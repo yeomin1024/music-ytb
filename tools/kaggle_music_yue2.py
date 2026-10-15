@@ -1,25 +1,44 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# VERSION: v1.1 — 2026-10-15 — 사용자 지시 "음악도구를 music-ytb에 옮기고 처음에 올렸던건 지워": yeomin1024-ytb → music-ytb 저장소로
-#          옮김. 동작은 v1.0 과 같고 셀 경로(/kaggle/working/music-ytb)·버전 표기만 바꿈
+# VERSION: v1.2 — 2026-10-15 — 사용자 지시 "내가 노래 하나 업로드하면 비슷한 느낌의 노래 여러 개 만드는 걸로 수정해봐 … 그리고 결과 음악은
+#          저장소에 올리고" (앞 대화: "표절 논란 없어야하니까 멜로디는 달라야하고 악기 구성은 비슷해도되고 조금 달라도 되고"):
+#          참고 곡 분석(--ref) → 스타일 프롬프트 → 여러 곡(--count) → 원곡과 멜로디 비교 → 통과한 곡만 music-ytb results/ 에 (--push)
 r"""
 YuE2 (m-a-p/YuE2-3B) 로 노래·연주곡을 Kaggle GPU 에서 만든다.  ※ 연구·교육용 도구. Kaggle 실제 GPU 실행은 아직 검증 전.
 
-Kaggle 노트북 — Settings → Accelerator: **GPU T4 x2**, Internet: **On** — 셀 (전체는 README.md):
+Kaggle 노트북 — Settings → Accelerator: **GPU T4 x2**, Internet: **On**. 셀 전체는 README.md.
 
-  !test -d /kaggle/working/music-ytb || git clone -q --depth 1 https://github.com/yeomin1024/music-ytb.git /kaggle/working/music-ytb
+  # 참고 곡 하나(+ Add Input → Upload) → 비슷한 분위기의 연주곡 4곡 → 멜로디 검사 → 통과한 곡만 저장소 results/ 에
+  !python /kaggle/working/music-ytb/tools/kaggle_music_yue2.py run --ref auto --count 4 --push
+
+  # 프롬프트만으로
   !python /kaggle/working/music-ytb/tools/kaggle_music_yue2.py run --mode instrumental \
       --style "calm lo-fi piano, soft drums, warm bass, 80 BPM" --seeds 1,2
 
-  - 세션마다 처음 한 번: /tmp/yue2/venv 에 파이썬 3.12 + yue2-infer 0.1.6(해시 고정) + torch 2.10 (몇 분),
+  - 세션마다 처음 한 번: /tmp/yue2/venv 에 파이썬 3.12 + yue2-infer 0.1.6(해시 고정) + torch 2.10 + 분석 패키지 (몇 분),
     GPU 점검(BF16 행렬곱·어텐션), 모델 YuE2-3B·YuE2-Vae 약 7.8GB(리비전 고정) → /tmp/yue2/hf
-  - 결과: /kaggle/working/music/<이름>/seed-<시드>/audio.flac · audio.mp3 · score.abc · kaggle_run.json
-  - 시드가 여러 개면 GPU 마다 나눠 동시에 (T4 x2 → 2곡 동시에. 공식 기준 '후보 2개 중 고르기')
+  - 결과: /kaggle/working/music/<이름>/seed-<시드>/audio.flac · audio.mp3(320k) · score.abc · kaggle_run.json · similarity.json
+  - 시드가 여러 개면 GPU 마다 나눠 동시에 (T4 x2 → 2곡 동시에)
+
+참고 곡 → 비슷한 분위기 (--ref 파일 | auto = /kaggle/input 아래 오디오 파일 하나)
+  원곡 소리는 YuE2 에 넣지 않는다. 분석 결과를 '글(스타일 프롬프트)'로만 넘기므로 멜로디는 모델이 새로 쓴다.
+  1) 분석: librosa(템포·조성·음량) · AudioSet 태그 모델 AST(장르·분위기·악기, 확률을 로그에) ·
+     SheetSage2(원곡 멜로디를 악보로 받아 적기 — 검사용, YuE2 팀의 공식 모델, 템포·조성도 여기 값을 먼저 씀)
+  2) 프롬프트 = [--style-extra] + 장르 + 분위기 + 악기 + 장·단조(SheetSage2 가 될 때만) + BPM. 곡 이름·가수 이름은 넣지 않는다.
+     --style 을 주면 그것을 씀
+  3) --count 곡 (시드 1..N)
+  4) 멜로디 검사 (similarity.json): 만든 곡의 악보(YuE2 계획) ↔ 원곡을 받아 적은 멜로디. 조옮김·템포와 상관없이
+     '음정 변화 + 리듬 비'가 연속으로 같은 가장 긴 구간을 잰다 (같은 음 반복만인 구간은 빼고).
+     리듬까지 같은 구간 ≥ FLAG_RUN_RHYTHM, 또는 음정만 같은 구간 ≥ FLAG_RUN_PITCH 이면 '검토 필요' — 경험칙이며 법적 판단이 아니다.
+     같은 프롬프트로 만든 곡끼리의 값(우연히 겹치는 정도)도 함께 적는다. 받아 적기가 틀리면 놓칠 수 있다(SheetSage2 오차).
+  5) --push: '통과' 곡만 저장소 results/<이름>/ 에 — mp3·악보·기록·검사 결과 + analysis.json·prompt.txt·README.md (허용 목록 방식).
+     원곡 파일·원곡 악보·원곡 파일 이름은 올리지 않는다. '검토 필요'는 --push-flagged, 멜로디 검사를 못 한 곡은 --push-unchecked 일 때만.
+     토큰은 환경 변수 GITHUB_TOKEN (Kaggle Secrets) — 로그·파일·명령줄·주소에 남기지 않는다 (git 이 물을 때만 GIT_ASKPASS 로).
 
 모드
   song          가사 파일(--lyrics-file, [Verse]·[Chorus] 같은 태그) + 스타일 → 노래
   instrumental  YuE2 가 악보(선율·화음)를 쓰고 → 노래 선율을 악기 성부로 옮긴 뒤(공식 yue2-instrumental 스킬의 변환 코드,
-                커밋 고정) → 연주곡. 영상 배경음악용. 섹션 수(--sections)로 길이를 대략 정한다 (초 단위 지정은 모델이 보장하지 않음)
+                커밋 고정) → 연주곡. 섹션 수(--sections)로 길이를 대략 정한다 (초 단위 지정은 모델이 보장하지 않음)
 
 T4(Turing, 연산 능력 7.5)에서 공식 코드가 그대로는 멈추거나 메모리가 넘치는 곳 2군데 — 연산 능력 < 8.0 일 때만 고친다 (로그 [PATCH]):
   1) AR 단계 CUDA 그래프가 어텐션을 'flash' 로 고른다. 고르는 조건이 '함수가 있는가'뿐이라 T4 에서도 고르는데,
@@ -28,14 +47,16 @@ T4(Turing, 연산 능력 7.5)에서 공식 코드가 그대로는 멈추거나 �
   2) T4 는 BF16 용 빠른 어텐션 커널(flash·mem-efficient·cuDNN)이 없어 수학 커널(fp32)로 가는데, 공식 NAR 코드는 CUDA 에서
      곡 전체 질의를 한 번에 계산(질의 × 키 행렬이 수 GB) → 공식 코드가 CPU 에서 쓰는 방법 그대로 질의를 --chunk(기본 256)줄씩.
   소리를 바꾸는 설정(BF16 가중치, 샘플링, 32 단계, VAE)은 그대로다. VRAM 20GiB 미만이면 공식 옵션 offload_ar 를 켠다
-  (NAR 동안 AR 가중치를 CPU 로 — 메모리만 아끼고 결과는 같다).
+  (NAR 동안 AR 가중치를 CPU 로 — 메모리만 아끼고 결과는 같다). SheetSage2 는 T4 에서 fp32 로 돌린다.
 
 라이선스: 코드 Apache-2.0, 가중치 CC BY-NC 4.0 + 창작자 추가 허가 — 개인 창작자는 결과물로 수익을 내도 된다(로열티 없음),
 회사의 상업 이용은 별도 계약 (공식 README 'License'). 공식 권장 사양은 BF16 지원 GPU 24GB — T4 는 권장 밖이라 느리다.
 
 다른 명령
-  setup   설치·GPU 점검만 (run 이 알아서 부름)
-  check   (venv 안에서) GPU 점검만 다시
+  setup        설치·GPU 점검만 (run 이 알아서 부름)
+  check        (venv 안에서) GPU 점검만 다시
+  similarity   --name 이름 : 이미 만든 곡들의 멜로디 검사를 다시
+  push         --name 이름 : 이미 만든 곡을 저장소에 (올리기가 실패했을 때)
 """
 # CHANGELOG
 #   v1.0 — 2026-10-15 — 새 도구. setup(uv 0.12.19 → 파이썬 3.12 venv, yue2-infer 0.1.6 휠 sha256 고정, 스킬 변환 코드 5개 커밋·sha256 고정,
@@ -44,6 +65,15 @@ T4(Turing, 연산 능력 7.5)에서 공식 코드가 그대로는 멈추거나 �
 #          (처음에는 yeomin1024-ytb 커밋 2223bfb)
 #   v1.1 — 2026-10-15 — 저장소 이동 yeomin1024-ytb → music-ytb (사용자 지시). 동작 변경 없음: 고정값·패치·로그 그대로,
 #          docstring 의 셀 경로와 TOOL_VERSION 만. 영향: 모듈 머리말, TOOL_VERSION (kaggle_run.json 의 tool 값)
+#   v1.2 — 2026-10-15 — 참고 곡 → 비슷한 분위기 여러 곡 → 멜로디 검사 → 저장소 올리기 (사용자 지시).
+#          새것: run --ref/--count/--style-extra/--push(-flagged·-unchecked·-flac)/--reanalyze, _analyze(librosa·AST·SheetSage2 →
+#          analysis.json·prompt.txt), 멜로디 비교(melody_line·melody_tokens·longest_run·compare_melodies·judge), run_similarity,
+#          push_check·publish_files·push_results, 명령 similarity·push.
+#          바뀐 것: 설치에 EXTRA_PACKAGES(librosa 0.11.0 + SheetSage2 의존 4개 — YuE2-Turbo 와 같은 고정) 추가, 스킬 파일에
+#          transcribe_cover.py·assets/cover-release.json 추가(경로 skill/scripts·skill/assets 로 — 설치를 한 번 다시 함),
+#          mp3 192k → 320k(저장소에 올리는 파일이라 음질 우선), --seeds 기본 = 1..--count(--ref 면 4, 아니면 1).
+#          장·단조는 SheetSage2 값만 프롬프트에 (librosa 크로마 추정은 합성 A단조를 A장조로 읽어 기록만).
+#          위험 관련 값 변화 없음 (생성 설정·T4 패치 그대로). 영향: setup, run, worker_cmd, generate_one(mp3), main
 import argparse
 import functools
 import hashlib
@@ -62,7 +92,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-TOOL_VERSION = "v1.1"
+TOOL_VERSION = "v1.2"
 ROOT = Path(__file__).resolve().parent.parent
 
 # ------------------------------------------------------------------ 고정값 (바꾸면 VERSION 을 올리고 CHANGELOG 에 적는다)
@@ -72,34 +102,94 @@ PACKAGE_VERSION = "0.1.6"
 WHEEL_URL = ("https://github.com/multimodal-art-projection/YuE/releases/download/"
              "yue2-v0.1.6/yue2_infer-0.1.6-py3-none-any.whl")
 WHEEL_SHA256 = "129a015327a2eca530760ffd2163ccb8cb65f7e601715de1d9626a40c568e2e2"
+EXTRA_PACKAGES = (
+    "librosa==0.11.0",  # 참고 곡 분석 (템포·조성·음량)
+    # SheetSage2 가 쓰는 것 — YuE2-Turbo(server extra)가 같은 YuE2 환경에서 SheetSage2 를 돌릴 때 고정한 버전
+    "mir_eval==0.8.2", "pretty_midi==0.2.10", "mido==1.3.3", "scipy==1.15.3",
+)
 SKILL_COMMIT = "1647252d68b70cbead046ffd3f7caf036dde47ee"  # YuE main 2026-10-06
 SKILL_URL = ("https://raw.githubusercontent.com/multimodal-art-projection/YuE/{commit}/"
-             "skills/yue2-music/instrumental/scripts/{name}")
-SKILL_FILES = {  # 연주곡 변환에 쓰는 공식 코드 (표준 라이브러리만 씀)
-    "abc_tools.py": "ea04b922dacebec7ad257a2f8d83bdb5dfecb7a23110c1a3121c5c41c313930e",
-    "common.py": "2929619bd37a176c87c37fdcde9864613d4d5172ca2d89d724aa450a4d7053be",
-    "compile_score.py": "c4eec7f68e3f09b93b45d568a8af640b3f10bb47d31ef6d3b6ce4ae23ac1dea3",
-    "instrumentalize.py": "a769111656f418cf4298841dc4a7f6be1a50bfae1e66b1bccfaca3eacf948681",
-    "instrumental.py": "bd294e4a57f1100722f7eeb14ed2457e1bc65b7a6cf516c4225fb1c3e7a441b0",
+             "skills/yue2-music/instrumental/{path}")
+SKILL_FILES = {  # 공식 yue2-instrumental 스킬 (표준 라이브러리만 — transcribe_cover 만 torch·transformers)
+    "scripts/abc_tools.py": "ea04b922dacebec7ad257a2f8d83bdb5dfecb7a23110c1a3121c5c41c313930e",
+    "scripts/common.py": "2929619bd37a176c87c37fdcde9864613d4d5172ca2d89d724aa450a4d7053be",
+    "scripts/compile_score.py": "c4eec7f68e3f09b93b45d568a8af640b3f10bb47d31ef6d3b6ce4ae23ac1dea3",
+    "scripts/instrumentalize.py": "a769111656f418cf4298841dc4a7f6be1a50bfae1e66b1bccfaca3eacf948681",
+    "scripts/instrumental.py": "bd294e4a57f1100722f7eeb14ed2457e1bc65b7a6cf516c4225fb1c3e7a441b0",
+    "scripts/transcribe_cover.py": "d88174a8d7cd4d8b9c86f7c6096f3d59796e2dcdb80a8e2878330273a9b52b34",  # 원곡 → 멜로디 악보
+    "assets/cover-release.json": "d5b31d144ae25a148802c7b44eab1612d3609bdb944c71a7a96915cc5df6c5a5",  # SheetSage2·MERT2 리비전
 }
 # 공식 연주곡 스킬(assets/release.json, 2026-09-22 검증)이 고정한 리비전
 MODEL, MODEL_REV = "m-a-p/YuE2-3B", "14fc6c6f146441b1dd6363fcb2e01e82a6914cb7"
 VAE, VAE_REV = "m-a-p/YuE2-Vae", "9a94e1d0ea9f8087e98f77fa88df4a4068104d2a"
+AST_MODEL = "MIT/ast-finetuned-audioset-10-10-0.4593"  # AudioSet 527 태그 (장르·분위기·악기)
 
 WORK = Path(os.environ.get("YUE2_WORK", "/tmp/yue2"))  # /kaggle/working(20GB, 출력으로 저장됨) 대신 임시 디스크
 VENV = WORK / "venv"
 VENV_PY = VENV / "bin" / "python"
-SKILL_DIR = WORK / "skill"
+SKILL_ROOT = WORK / "skill"
+SKILL_DIR = SKILL_ROOT / "scripts"  # transcribe_cover.py 가 ../assets/cover-release.json 을 읽는다
 HF_HOME = WORK / "hf"
 READY = WORK / "ready.json"
 OUT = Path("/kaggle/working/music") if Path("/kaggle/working").is_dir() else ROOT / "output" / "music"
-MIN_FREE_GB = 20  # venv(torch·CUDA 라이브러리) 약 6GB + 모델 7.8GB + 여유
+KAGGLE_INPUT = Path("/kaggle/input")
+AUDIO_EXT = (".mp3", ".wav", ".flac", ".m4a", ".ogg", ".opus", ".aac")
+MIN_FREE_GB = 25  # venv(torch·CUDA 라이브러리) 약 6GB + YuE2 7.8GB + SheetSage2·MERT2·AST 약 4GB + 여유
 MIN_CAP = (7, 5)  # torch 2.10(PyPI, CUDA 12.8 빌드)이 지원하는 가장 낮은 연산 능력 — P100(6.0)은 안 됨
 PATCH_BELOW = (8, 0)  # FlashAttention·BF16 빠른 어텐션 커널이 생기는 연산 능력
 DEFAULT_CHUNK = 256  # 공식 nar.attention 이 CPU/MPS 에서 쓰는 질의 묶음 크기
 DEFAULT_SECTIONS = "Intro,Verse,Chorus,Outro"  # 공식 연주곡 스킬의 기본 계획 태그
+REF_COUNT = 4  # --ref 일 때 기본 곡 수
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,100}")
 SR = 48000
+MP3_BITRATE = "320k"
+
+# 저장소 올리기
+REPO_SLUG = "yeomin1024/music-ytb"
+RESULTS_DIR = "results"
+MAX_PUSH_MB = 95  # GitHub 파일 한도 100MB
+GIT_NAME, GIT_EMAIL = "kaggle_music_yue2 (Kaggle)", "kaggle-music-yue2@users.noreply.github.com"
+PUSH_TRIES = 4
+SEED_FILES = ("audio.mp3", "score.abc", "kaggle_run.json", "similarity.json")  # 곡마다 올리는 것 (허용 목록)
+NAME_FILES = ("analysis.json", "prompt.txt")  # 이름마다 올리는 것 — reference/ 폴더(원곡·원곡 악보)는 목록에 없다
+
+# 멜로디 검사 기준 — 경험칙이며 법적 판단이 아니다. 근거는 tools/tests 의 무작위 멜로디 실험 (README '멜로디 검사')
+FLAG_RUN_RHYTHM = 8   # 음정 변화 + 리듬 비가 연속 8개(음 10개) 같으면 '검토 필요'
+FLAG_RUN_PITCH = 12   # 리듬은 달라도 음정 변화가 연속 12개(음 13개) 같으면 '검토 필요'
+MIN_MOVING = 4        # 같은 음 반복만인 구간은 세지 않는다 — 구간 안에 움직이는 음정(≠0)이 이만큼은 있어야
+VERDICT_KO = {"pass": "통과", "review": "검토 필요", "unchecked": "멜로디 검사 못 함", "no_ref": "참고 곡 없음"}
+PUSH_DEFAULT = ("pass", "no_ref")
+
+# AudioSet 태그 → 프롬프트 말. 확률(10초 창 평균)이 기준 이상인 것만, 높은 순으로. 기준은 보정 전 값 — 로그의 확률을 보고 조정
+TAG_GENRES = {
+    "Pop music": "pop", "Rock music": "rock", "Punk rock": "punk rock", "Heavy metal": "metal",
+    "Progressive rock": "progressive rock", "Grunge": "grunge", "Rock and roll": "rock and roll",
+    "Hip hop music": "hip hop", "Rhythm and blues": "R&B", "Soul music": "soul", "Funk": "funk", "Disco": "disco",
+    "Jazz": "jazz", "Blues": "blues", "Country": "country", "Folk music": "folk", "Reggae": "reggae", "Ska": "ska",
+    "Classical music": "classical", "Electronic music": "electronic", "Electronic dance music": "EDM",
+    "House music": "house", "Techno": "techno", "Trance music": "trance", "Dubstep": "dubstep",
+    "Drum and bass": "drum and bass", "Ambient music": "ambient", "Electronica": "electronica",
+    "New-age music": "new age", "Video game music": "video game music", "Soundtrack music": "cinematic soundtrack",
+}
+TAG_MOODS = {
+    "Happy music": "happy and bright", "Exciting music": "energetic and exciting", "Sad music": "sad and emotional",
+    "Tender music": "tender and warm", "Angry music": "intense and aggressive", "Scary music": "dark and tense",
+    "Funny music": "playful",
+}
+TAG_INSTRUMENTS = {
+    "Piano": "piano", "Electric piano": "electric piano", "Organ": "organ", "Synthesizer": "synthesizer",
+    "Electric guitar": "electric guitar", "Acoustic guitar": "acoustic guitar", "Bass guitar": "electric bass",
+    "Drum kit": "live drums", "Drum machine": "drum machine", "Violin, fiddle": "strings", "Cello": "strings",
+    "String section": "strings", "Bowed string instrument": "strings", "Orchestra": "strings",
+    "Brass instrument": "brass", "Trumpet": "brass", "Saxophone": "saxophone", "Flute": "flute", "Harp": "harp",
+    "Glockenspiel": "glockenspiel", "Marimba, xylophone": "marimba", "Accordion": "accordion", "Ukulele": "ukulele",
+    "Mandolin": "mandolin", "Banjo": "banjo", "Harmonica": "harmonica",
+}
+TAG_RULES = (("genres", TAG_GENRES, 0.15, 2), ("moods", TAG_MOODS, 0.10, 1), ("instruments", TAG_INSTRUMENTS, 0.10, 6))
+
+PITCH_NAMES = ("C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B")
+KK_MAJOR = (6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88)  # Krumhansl–Kessler
+KK_MINOR = (6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17)
 
 LOG = logging.getLogger("yue2")
 
@@ -152,6 +242,16 @@ def parse_seeds(text):
     return seeds
 
 
+def resolve_seeds(seeds_text, count, has_ref):
+    """--seeds 를 주면 그대로, 아니면 1..count (count 기본: 참고 곡이면 REF_COUNT, 아니면 1)."""
+    if seeds_text:
+        return parse_seeds(seeds_text)
+    n = count if count is not None else (REF_COUNT if has_ref else 1)
+    if not isinstance(n, int) or n < 1 or n > 64:
+        raise ValueError(f"--count 는 1~64: {n}")
+    return list(range(1, n + 1))
+
+
 def section_lyrics(sections):
     """'Intro,Verse,Chorus,Outro' → '[Intro]\\n\\n[Verse]\\n\\n[Chorus]\\n\\n[Outro]\\n' (공식 연주곡 계획 가사와 같은 모양)."""
     names = [s.strip() for s in str(sections).split(",") if s.strip()]
@@ -202,6 +302,171 @@ def sha256_file(path):
         for block in iter(lambda: f.read(1 << 20), b""):
             h.update(block)
     return h.hexdigest()
+
+
+def find_reference(spec, input_root=KAGGLE_INPUT):
+    """--ref 파일 경로 또는 'auto'(input_root 아래 오디오 파일이 딱 하나일 때) → Path."""
+    if spec != "auto":
+        p = Path(spec)
+        if not p.is_file():
+            raise FileNotFoundError(f"참고 곡 파일이 없음: {spec}")
+        return p
+    found = sorted(p for p in Path(input_root).rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXT) \
+        if Path(input_root).is_dir() else []
+    if not found:
+        raise FileNotFoundError(f"{input_root} 아래 오디오 파일이 없음 — 오른쪽 + Add Input → Upload 로 곡 하나를 올리기")
+    if len(found) > 1:
+        raise ValueError("오디오 파일이 여러 개 — --ref 로 하나를 고르기: " + " · ".join(str(p) for p in found[:10]))
+    return found[0]
+
+
+# ------------------------------------------------------------------ 참고 곡 분석 — 순수 함수 (시험 가능)
+def _pearson(a, b):
+    ma, mb = sum(a) / len(a), sum(b) / len(b)
+    num = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    den = math.sqrt(sum((x - ma) ** 2 for x in a) * sum((y - mb) ** 2 for y in b))
+    return num / den if den else 0.0
+
+
+def estimate_key(chroma):
+    """12칸 크로마 평균(C, C#, …, B) → Krumhansl–Kessler 조성 {tonic, mode, r, margin(2등과 차이)}."""
+    if len(chroma) != 12:
+        raise ValueError("크로마는 12칸")
+    scores = []
+    for tonic in range(12):
+        for mode, prof in (("major", KK_MAJOR), ("minor", KK_MINOR)):
+            scores.append((_pearson(list(chroma), [prof[(i - tonic) % 12] for i in range(12)]), tonic, mode))
+    scores.sort(reverse=True)
+    r, tonic, mode = scores[0]
+    return dict(tonic=PITCH_NAMES[tonic], mode=mode, r=round(r, 3), margin=round(r - scores[1][0], 3))
+
+
+def abc_key_mode(key):
+    """ABC 조표 'Am'·'F#m'·'Bb' → (으뜸음, 'minor'|'major')."""
+    key = (key or "").strip()
+    if not key:
+        return None, None
+    return (key[:-1], "minor") if key.endswith("m") else (key, "major")
+
+
+def select_tags(probs, rules=TAG_RULES):
+    """AudioSet 확률 {이름: p} → {genres: [...], moods: [...], instruments: [...], *_evidence: [(이름, p)]}.
+    같은 프롬프트 말(예: Cello·String section → strings)은 한 번만."""
+    out = {}
+    for kind, table, minimum, limit in rules:
+        words, evidence = [], []
+        for label, p in sorted(((lb, probs[lb]) for lb in table if lb in probs), key=lambda x: -x[1]):
+            if p < minimum or len(words) >= limit:
+                break
+            if table[label] in words:
+                continue
+            words.append(table[label])
+            evidence.append((label, round(float(p), 3)))
+        out[kind] = words
+        out[kind + "_evidence"] = evidence
+    return out
+
+
+def build_prompt(tags, bpm, mode, extra=""):
+    """[extra] + 장르 + 분위기 + 악기 + 장·단조 + BPM → 영어 스타일 프롬프트 (곡·가수 이름은 넣지 않는다)."""
+    parts = []
+    extra = (extra or "").strip().rstrip(".,")
+    if extra:
+        parts.append(extra)
+    for kind in ("genres", "moods", "instruments"):
+        parts += [w for w in tags.get(kind, []) if w.lower() not in extra.lower()]
+    if mode in ("major", "minor"):
+        parts.append(f"{mode} key")
+    if bpm and bpm > 0:
+        parts.append(f"{int(round(bpm))} BPM")
+    return ", ".join(parts)
+
+
+# ------------------------------------------------------------------ 멜로디 검사 — 순수 함수 (시험 가능)
+def melody_line(score):
+    """abc_tools Score 의 Vocal·Ins 음표 → 같은 시각에는 가장 높은 음 하나(주선율 근사) → [(onset 4분음표, MIDI 음)] 시간순."""
+    top = {}
+    for name in ("Vocal", "Ins"):
+        voice = score.voices.get(name)
+        if voice is None:
+            continue
+        for onset, pitch, _duration in voice.notes:
+            if onset not in top or pitch > top[onset]:
+                top[onset] = pitch
+    return [(t, top[t]) for t in sorted(top)]
+
+
+def melody_tokens(line):
+    """→ (음정 변화 목록, 리듬 비 목록). i 번째 = 음 i→i+1 의 반음 차이, 리듬 비 = 간격(i→i+1) / 간격(i-1→i) (i=0 은 None).
+    조옮김과 템포(반·두 배 박자 표기 포함)에 상관없다."""
+    pitch = [line[i + 1][1] - line[i][1] for i in range(len(line) - 1)]
+    ioi = [line[i + 1][0] - line[i][0] for i in range(len(line) - 1)]
+    rhythm = [None] + [ioi[i] / ioi[i - 1] for i in range(1, len(ioi))]
+    return pitch, rhythm
+
+
+def longest_run(a, b, moving=None, min_moving=MIN_MOVING):
+    """a·b 에서 연속으로 같은 가장 긴 구간 → (길이, a 끝 다음 위치, b 끝 다음 위치).
+    moving(토큰)→bool 을 주면, 구간 안에 움직이는 토큰이 min_moving 개 이상인 구간만 센다."""
+    best = (0, 0, 0)
+    prev_len = [0] * (len(b) + 1)
+    prev_mov = [0] * (len(b) + 1)
+    for i in range(1, len(a) + 1):
+        cur_len = [0] * (len(b) + 1)
+        cur_mov = [0] * (len(b) + 1)
+        ai = a[i - 1]
+        add = 1 if moving is None or moving(ai) else 0
+        for j in range(1, len(b) + 1):
+            if ai == b[j - 1]:
+                length = prev_len[j - 1] + 1
+                mov = prev_mov[j - 1] + add
+                cur_len[j], cur_mov[j] = length, mov
+                if length > best[0] and (moving is None or mov >= min_moving):
+                    best = (length, i, j)
+        prev_len, prev_mov = cur_len, cur_mov
+    return best
+
+
+def _ngrams(seq, n):
+    return {tuple(seq[i:i + n]) for i in range(len(seq) - n + 1) if any(seq[i:i + n])}
+
+
+def compare_melodies(ref, gen, ref_bpm, gen_bpm):
+    """두 멜로디 줄 → 겹침 지표. 음이 3개 미만이면 None."""
+    if len(ref) < 3 or len(gen) < 3:
+        return None
+    rp, rr = melody_tokens(ref)
+    gp, gr = melody_tokens(gen)
+    rt, gt = list(zip(rp[1:], rr[1:])), list(zip(gp[1:], gr[1:]))
+    run_r, r_end, g_end = longest_run(rt, gt, moving=lambda t: t[0] != 0)
+    run_p, rp_end, gp_end = longest_run(rp, gp, moving=lambda t: t != 0)
+
+    def at(line, note, bpm):
+        return round(float(line[note][0]) * 60 / bpm, 1) if bpm else None
+
+    shared = _ngrams(gp, 6) & _ngrams(rp, 6)
+    gen_grams = _ngrams(gp, 6)
+    return dict(
+        run_rhythm=run_r, run_pitch=run_p,
+        # 리듬 토큰 k 는 음 k+1→k+2, 음정 토큰 k 는 음 k→k+1 → 구간 첫 음 위치
+        rhythm_ref_at_s=at(ref, r_end - run_r + 1, ref_bpm) if run_r else None,
+        rhythm_gen_at_s=at(gen, g_end - run_r + 1, gen_bpm) if run_r else None,
+        pitch_ref_at_s=at(ref, rp_end - run_p, ref_bpm) if run_p else None,
+        pitch_gen_at_s=at(gen, gp_end - run_p, gen_bpm) if run_p else None,
+        shared_pitch_6grams=round(len(shared) / len(gen_grams), 3) if gen_grams else 0.0,
+        ref_notes=len(ref), gen_notes=len(gen),
+    )
+
+
+def judge(metrics, has_ref=True):
+    """지표 → 'pass' | 'review' | 'unchecked' | 'no_ref' (경험칙 — 법적 판단이 아님)."""
+    if not has_ref:
+        return "no_ref"
+    if metrics is None:
+        return "unchecked"
+    if metrics["run_rhythm"] >= FLAG_RUN_RHYTHM or metrics["run_pitch"] >= FLAG_RUN_PITCH:
+        return "review"
+    return "pass"
 
 
 # ------------------------------------------------------------------ T4 패치 (모듈을 인자로 받아 GPU 없이 시험 가능)
@@ -318,6 +583,7 @@ def download(url, dest, sha256, stage):
 def worker_env(gpu=None):
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)  # Kaggle 기본 패키지가 venv 로 섞이지 않게
+    env.pop("GITHUB_TOKEN", None)  # 생성·분석 프로세스는 토큰이 필요 없다
     env.update(PYTHONNOUSERSITE="1", PYTHONUNBUFFERED="1", HF_HOME=str(HF_HOME), HF_HUB_DISABLE_PROGRESS_BARS="1")
     if gpu is not None:
         env["CUDA_VISIBLE_DEVICES"] = str(gpu)
@@ -329,7 +595,7 @@ def setup(force=False):
     t0 = time.time()
     rows, err = query_gpus()
     log("ENV", python=sys.version.split()[0], gpus=len(rows), ram_gib=round(ram_gib(), 1),
-        disk_free_gb=round(disk_free_gb(WORK), 1), work=WORK, out=OUT)
+        disk_free_gb=round(disk_free_gb(WORK), 1), ffmpeg=bool(shutil.which("ffmpeg")), work=WORK, out=OUT)
     for g in rows:
         log("ENV", gpu=g["index"], name=g["name"], vram_mib=g["mem_mib"], driver=g["driver"],
             cap=".".join(map(str, g["cap"])) if g["cap"] else "?")
@@ -342,7 +608,8 @@ def setup(force=False):
     if disk_free_gb(WORK) < MIN_FREE_GB:
         log("ENV", logging.WARNING, warning="디스크 여유가 적음", need_gb=MIN_FREE_GB,
             hint="설치·모델 받기에서 멈추면 YUE2_WORK 환경 변수로 더 큰 디스크를 지정")
-    want = {"tool": TOOL_VERSION, "wheel_sha256": WHEEL_SHA256, "skill_commit": SKILL_COMMIT, "python": PYTHON_VERSION}
+    want = {"tool": TOOL_VERSION, "wheel_sha256": WHEEL_SHA256, "skill_commit": SKILL_COMMIT, "python": PYTHON_VERSION,
+            "extra": list(EXTRA_PACKAGES), "skill_files": sorted(SKILL_FILES)}
     if READY.is_file() and VENV_PY.is_file() and not force:
         try:
             have = json.loads(READY.read_text(encoding="utf-8"))
@@ -359,15 +626,18 @@ def setup(force=False):
     run_cmd([sys.executable, "-m", "uv", "venv", "--python", PYTHON_VERSION, VENV], "SETUP",
             "uv 가 파이썬 3.12 를 못 받음 → Internet On 확인")
     wheel = download(WHEEL_URL, WORK / Path(WHEEL_URL).name, WHEEL_SHA256, "SETUP")
-    run_cmd([sys.executable, "-m", "uv", "pip", "install", "--python", VENV_PY, wheel], "SETUP",
-            "torch 2.10·transformers 설치 실패 → 위 오류 줄 확인 (디스크·네트워크)")
-    for name, digest in SKILL_FILES.items():
-        download(SKILL_URL.format(commit=SKILL_COMMIT, name=name), SKILL_DIR / name, digest, "SETUP")
+    run_cmd([sys.executable, "-m", "uv", "pip", "install", "--python", VENV_PY, wheel, *EXTRA_PACKAGES], "SETUP",
+            "torch 2.10·transformers·librosa 설치 실패 → 위 오류 줄 확인 (디스크·네트워크)")
+    freeze = subprocess.run([sys.executable, "-m", "uv", "pip", "freeze", "--python", str(VENV_PY)],
+                            capture_output=True, text=True)
+    (WORK / "freeze.txt").write_text(freeze.stdout, encoding="utf-8")  # 실제 설치 버전 기록 (재현용)
+    for path, digest in SKILL_FILES.items():
+        download(SKILL_URL.format(commit=SKILL_COMMIT, path=path), SKILL_ROOT / path, digest, "SETUP")
     run_cmd([VENV_PY, Path(__file__).resolve(), "check"], "CHECK",
             "이 GPU 에서 공식 BF16 경로가 안 됨 → 위 [CHECK] 줄 확인 (대안: yue2.cpp GGUF 포팅)", env=worker_env())
     READY.write_text(json.dumps(want | {"created": datetime.now().isoformat(timespec="seconds")}, ensure_ascii=False),
                      encoding="utf-8")
-    log("SETUP", status="done", minutes=round((time.time() - t0) / 60, 1), venv=VENV)
+    log("SETUP", status="done", minutes=round((time.time() - t0) / 60, 1), venv=VENV, freeze=WORK / "freeze.txt")
     return rows
 
 
@@ -401,8 +671,157 @@ def check():
         log("CHECK", logging.INFO if ok else logging.ERROR, gpu=i, name=torch.cuda.get_device_name(i),
             cap=f"{cap[0]}.{cap[1]}", bf16_supported=bf16, bf16_matmul_rel_err=rel, sdpa_gqa_ok=sdpa_ok,
             patch="t4" if cap < PATCH_BELOW else "none", ok=ok)
+    try:
+        import librosa
+        log("CHECK", librosa=librosa.__version__)
+    except ImportError as e:
+        bad += 1
+        log("CHECK", logging.ERROR, error=f"librosa 없음: {e}")
     if bad:
-        die("CHECK", error=f"GPU {bad}개 점검 실패", hint="위 [CHECK] 줄 · 대안: yue2.cpp(GGUF) 포팅")
+        die("CHECK", error=f"점검 실패 {bad}개", hint="위 [CHECK] 줄 · GPU 문제면 대안: yue2.cpp(GGUF) 포팅")
+    return 0
+
+
+# ------------------------------------------------------------------ venv 안 — 참고 곡 분석
+def audio_features(wav):
+    """librosa(torch 없이) → (공개용 수치, 조성, 템포, 22.05kHz 모노 신호, sr)."""
+    import numpy as np
+    import librosa
+    y, sr = librosa.load(str(wav), sr=22050, mono=True)
+    seconds = len(y) / sr
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+    tempo = float(np.atleast_1d(tempo)[0])
+    key = estimate_key([float(x) for x in librosa.feature.chroma_cqt(y=y, sr=sr).mean(axis=1)])
+    rms_db = 20 * np.log10(librosa.feature.rms(y=y)[0] + 1e-9)
+    feats = dict(seconds=round(seconds, 1), tempo_bpm=round(tempo, 1), key=f"{key['tonic']} {key['mode']}", key_r=key["r"],
+                 key_margin=key["margin"], loudness_db=round(float(rms_db.mean()), 1),
+                 dynamic_range_db=round(float(np.percentile(rms_db, 95) - np.percentile(rms_db, 10)), 1),
+                 brightness_hz=round(float(librosa.feature.spectral_centroid(y=y, sr=sr).mean()), 0),
+                 onsets_per_s=round(len(librosa.onset.onset_detect(y=y, sr=sr)) / max(seconds, 1e-9), 2))
+    return feats, key, tempo, y, sr
+
+
+def ast_probs(y16, device):
+    """16kHz 모노 → AudioSet 태그 확률(10초 창, 최대 36개 창 평균) → ({이름: p}, 정보)."""
+    import torch
+    from transformers import ASTFeatureExtractor, ASTForAudioClassification
+    fe = ASTFeatureExtractor.from_pretrained(AST_MODEL)
+    model = ASTForAudioClassification.from_pretrained(AST_MODEL).to(device).eval()
+    win = 16000 * 10
+    starts = list(range(0, max(1, len(y16) - win + 1), win)) or [0]
+    if len(starts) > 36:
+        starts = [starts[round(i * (len(starts) - 1) / 35)] for i in range(36)]
+    total, n = None, 0
+    with torch.inference_mode():
+        for k in range(0, len(starts), 8):
+            batch = [y16[s:s + win] for s in starts[k:k + 8]]
+            inputs = fe(batch, sampling_rate=16000, return_tensors="pt").to(device)
+            p = torch.sigmoid(model(**inputs).logits).float().cpu()
+            total = p.sum(0) if total is None else total + p.sum(0)
+            n += p.shape[0]
+    mean = (total / n).tolist()
+    labels = model.config.id2label
+    info = dict(model=AST_MODEL, revision=getattr(model.config, "_commit_hash", None), windows=n)
+    del model
+    if device != "cpu":
+        torch.cuda.empty_cache()
+    return {labels[i]: mean[i] for i in range(len(mean))}, info
+
+
+def analyze(args):
+    """(venv) 참고 곡 → <이름>/analysis.json·prompt.txt (공개용, 파일 이름 없음) + <이름>/reference/ (로컬만: ref.wav·받아 적은 악보)."""
+    import torch
+    import librosa
+    name_dir = Path(args.out) / args.name
+    ref_dir = name_dir / "reference"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    src = Path(args.ref)
+    t0 = time.time()
+    wav = ref_dir / "ref.wav"
+    if shutil.which("ffmpeg"):
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-ac", "2", "-ar", "44100",
+                            str(wav)])
+        if r.returncode:
+            die("REF", error="ffmpeg 로 읽지 못함", hint="mp3·wav·flac 로 바꿔 다시 올리기")
+    elif src.suffix.lower() in (".wav", ".flac", ".mp3", ".ogg"):
+        wav = src
+    else:
+        die("REF", error="ffmpeg 가 없어 이 형식을 못 읽음", hint="wav·flac·mp3 로 올리기")
+    ref_sha = sha256_file(src)
+    log("REF", file=src.name, sha256=ref_sha[:12], bytes=src.stat().st_size, note="파일 이름은 이 로그(로컬)에만 — 저장소에는 sha256 만")
+
+    # 1) librosa — 템포·조성·음량 (조성·템포는 SheetSage2 가 되면 그 값을 먼저 씀)
+    feats, _key, tempo, y, sr = audio_features(wav)
+    if feats["seconds"] < 20:
+        log("ANALYZE", logging.WARNING, warning="곡이 20초보다 짧음 — 분석이 부정확할 수 있음", seconds=feats["seconds"])
+    log("ANALYZE", step="librosa", **feats)
+
+    # 2) AudioSet 태그 — 장르·분위기·악기
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    tags, ast_info, top = {"genres": [], "moods": [], "instruments": []}, {}, []
+    try:
+        y16 = librosa.resample(y, orig_sr=sr, target_sr=16000)
+        probs, ast_info = ast_probs(y16, device)
+        tags = select_tags(probs)
+        top = [(lb, round(p, 3)) for lb, p in sorted(probs.items(), key=lambda x: -x[1])[:15]]
+        missing = sorted(lb for _, table, _, _ in TAG_RULES for lb in table if lb not in probs)
+        log("ANALYZE", step="tags", windows=ast_info.get("windows"), top=";".join(f"{lb}:{p}" for lb, p in top))
+        for kind in ("genres", "moods", "instruments"):
+            log("ANALYZE", step="tags", kind=kind, picked=",".join(tags[kind]) or "-",
+                evidence=";".join(f"{lb}:{p}" for lb, p in tags[kind + "_evidence"]) or "-")
+        if missing:
+            log("ANALYZE", logging.WARNING, warning="태그 표의 이름 중 모델에 없는 것", names=",".join(missing))
+    except Exception as e:  # noqa: BLE001
+        log("ANALYZE", logging.WARNING, step="tags", error=f"{type(e).__name__}: {e}",
+            hint="장르·악기를 --style-extra 로 직접 (예: \"J-pop band, piano, electric guitar, strings\")")
+
+    # 3) SheetSage2 — 원곡 멜로디 받아 적기 (멜로디 검사용, 템포·조성도)
+    cap = torch.cuda.get_device_capability(0) if torch.cuda.is_available() else (0, 0)
+    tdir = ref_dir / "transcription"
+    sheet = dict(ok=False)
+    if not (tdir / "score.abc").is_file():
+        if tdir.exists():
+            shutil.rmtree(tdir)
+        cmd = [sys.executable, str(SKILL_DIR / "transcribe_cover.py"), str(wav), "--output", str(tdir), "--task", "melody-full",
+               "--device", device, "--dtype", "bf16" if device == "cuda" and cap >= PATCH_BELOW else "fp32"]
+        log("ANALYZE", step="sheetsage2", device=device, dtype=cmd[-1], task="melody-full")
+        t1 = time.time()
+        rc = subprocess.run(cmd).returncode
+        log("ANALYZE", step="sheetsage2", exit=rc, seconds=round(time.time() - t1, 1))
+    if (tdir / "score.abc").is_file():
+        try:
+            sys.path.insert(0, str(SKILL_DIR))
+            from abc_tools import parse_abc
+            score = parse_abc((tdir / "score.abc").read_text(encoding="utf-8"))
+            tonic, mode = abc_key_mode(score.voices["Vocal"].key)
+            sheet = dict(ok=True, bpm=score.bpm, key=f"{tonic} {mode}", melody_notes=len(melody_line(score)))
+        except Exception as e:  # noqa: BLE001
+            sheet = dict(ok=False, error=f"{type(e).__name__}: {e}")
+    else:
+        failure = tdir / "failure.json"
+        sheet["error"] = json.loads(failure.read_text(encoding="utf-8")).get("error") if failure.is_file() else "score.abc 없음"
+    log("ANALYZE", logging.INFO if sheet["ok"] else logging.WARNING, step="sheetsage2", **sheet,
+        **({} if sheet["ok"] else {"hint": "멜로디 검사 못 함 → 이 곡들은 --push-unchecked 일 때만 올림 · 다시 받아 적기는 --reanalyze"}))
+
+    # 4) 프롬프트 — 장·단조는 SheetSage2 값만 넣는다 (librosa 크로마 추정은 합성 시험에서 A단조를 A장조로 읽음 → 기록만)
+    if sheet["ok"]:
+        bpm, mode, src_name, key_from = sheet["bpm"], sheet["key"].split()[1], "sheetsage2", "sheetsage2"
+    else:
+        bpm, mode, src_name, key_from = tempo, None, "librosa", "생략 (librosa 추정은 기록만)"
+    style = build_prompt(tags, bpm, mode, args.style_extra)
+    if not (tags["genres"] or tags["instruments"] or args.style_extra.strip()):
+        log("PROMPT", logging.WARNING, warning="장르·악기 태그가 없음 — 프롬프트가 템포·조성뿐",
+            hint="--style-extra 로 장르·악기를 더하기")
+    public = dict(tool=TOOL_VERSION, created=datetime.now().isoformat(timespec="seconds"),
+                  reference=dict(sha256=ref_sha, seconds=feats["seconds"]),
+                  librosa=feats, tags={k: v for k, v in tags.items()}, tags_top15=top, ast=ast_info,
+                  sheetsage2=dict(sheet),
+                  prompt=dict(style=style, extra=args.style_extra, tempo_from=src_name, key_from=key_from),
+                  note="원곡 파일·원곡 악보·파일 이름은 저장소에 올리지 않는다. 연구·교육용.")
+    (name_dir / "analysis.json").write_text(json.dumps(public, ensure_ascii=False, indent=1), encoding="utf-8")
+    (name_dir / "prompt.txt").write_text(style + "\n", encoding="utf-8")
+    log("PROMPT", style=style, tempo_from=src_name, bpm=round(float(bpm), 1), mode=mode or "-", key_from=key_from,
+        minutes=round((time.time() - t0) / 60, 1))
     return 0
 
 
@@ -480,7 +899,7 @@ def generate_one(pipe, args, seed, meta):
     if shutil.which("ffmpeg"):
         mp3 = out / "audio.mp3"
         r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-n", "-i", str(out / "audio.flac"),
-                            "-b:a", "192k", str(mp3)])
+                            "-b:a", MP3_BITRATE, str(mp3)])
         if r.returncode:
             log("SAVE", logging.WARNING, warning="mp3 변환 실패 — flac 은 있음", seed=seed)
             mp3 = None
@@ -542,10 +961,228 @@ def worker(args):
     return rc
 
 
+# ------------------------------------------------------------------ 멜로디 검사 실행 (Kaggle 기본 파이썬 — abc_tools 는 표준 라이브러리만)
+def run_similarity(name_dir, parse_abc=None):
+    """<이름>/seed-*/score.abc ↔ <이름>/reference/transcription/score.abc → seed 마다 similarity.json → {seed 폴더 이름: 기록}."""
+    if parse_abc is None:
+        if not (SKILL_DIR / "abc_tools.py").is_file():
+            die("SIMILARITY", error="abc_tools.py 없음", hint="setup 을 먼저 (run 이 알아서 함)")
+        sys.path.insert(0, str(SKILL_DIR))
+        from abc_tools import parse_abc  # noqa: F811
+    name_dir = Path(name_dir)
+    has_ref = (name_dir / "reference").is_dir()
+    ref = None
+    ref_abc = name_dir / "reference" / "transcription" / "score.abc"
+    if ref_abc.is_file():
+        try:
+            s = parse_abc(ref_abc.read_text(encoding="utf-8"))
+            ref = (melody_line(s), s.bpm)
+        except Exception as e:  # noqa: BLE001
+            log("SIMILARITY", logging.WARNING, error=f"원곡 악보를 읽지 못함: {type(e).__name__}: {e}")
+    seeds = sorted((d for d in name_dir.glob("seed-*") if (d / "kaggle_run.json").is_file()), key=lambda d: d.name)
+    gens = {}
+    for d in seeds:
+        if (d / "score.abc").is_file():
+            try:
+                s = parse_abc((d / "score.abc").read_text(encoding="utf-8"))
+                gens[d.name] = (melody_line(s), s.bpm)
+            except Exception as e:  # noqa: BLE001
+                log("SIMILARITY", logging.WARNING, seed=d.name, error=f"악보를 읽지 못함: {type(e).__name__}: {e}")
+    # 같은 프롬프트로 만든 곡끼리 — 우연히 겹치는 정도 (판정에는 안 쓰고 함께 적기만)
+    baseline = dict(run_rhythm=0, run_pitch=0, pairs=0)
+    names = sorted(gens)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            m = compare_melodies(gens[a][0], gens[b][0], gens[a][1], gens[b][1])
+            if m:
+                baseline["pairs"] += 1
+                baseline["run_rhythm"] = max(baseline["run_rhythm"], m["run_rhythm"])
+                baseline["run_pitch"] = max(baseline["run_pitch"], m["run_pitch"])
+    results = {}
+    for d in seeds:
+        m = compare_melodies(ref[0], gens[d.name][0], ref[1], gens[d.name][1]) if ref and d.name in gens else None
+        verdict = judge(m, has_ref)
+        record = dict(tool=TOOL_VERSION, verdict=verdict, verdict_ko=VERDICT_KO[verdict], melody=m,
+                      baseline_between_generated=baseline,
+                      thresholds=dict(run_rhythm=FLAG_RUN_RHYTHM, run_pitch=FLAG_RUN_PITCH, min_moving=MIN_MOVING),
+                      method="만든 곡 악보(YuE2 계획) ↔ 원곡을 SheetSage2 로 받아 적은 멜로디. 같은 시각 가장 높은 음, "
+                             "조옮김·템포 무관(음정 변화·리듬 비), 연속으로 같은 가장 긴 구간",
+                      note="경험칙이며 법적 판단이 아니다. 받아 적기 오차로 놓칠 수 있다.")
+        (d / "similarity.json").write_text(json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
+        log("SIMILARITY", logging.INFO if verdict in PUSH_DEFAULT else logging.WARNING, seed=d.name,
+            verdict=VERDICT_KO[verdict], run_rhythm=m["run_rhythm"] if m else "-", run_pitch=m["run_pitch"] if m else "-",
+            ref_at_s=m["rhythm_ref_at_s"] if m else "-", gen_at_s=m["rhythm_gen_at_s"] if m else "-",
+            baseline=f"{baseline['run_rhythm']}/{baseline['run_pitch']}")
+        results[d.name] = record
+    return results
+
+
+# ------------------------------------------------------------------ 저장소 올리기 (Kaggle 기본 파이썬)
+def git_env():
+    """→ (환경, 토큰 있음). 토큰은 GIT_ASKPASS 스크립트가 환경 변수에서 읽어 git 에만 넘긴다 (스크립트 파일에는 토큰이 없다)."""
+    askpass = WORK / "git_askpass.sh"
+    askpass.parent.mkdir(parents=True, exist_ok=True)
+    askpass.write_text('#!/bin/sh\ncase "$1" in\n  Username*) echo x-access-token ;;\n  *) echo "$GITHUB_TOKEN" ;;\nesac\n',
+                       encoding="utf-8")
+    askpass.chmod(0o700)
+    env = os.environ.copy()
+    env.update(GIT_ASKPASS=str(askpass), GIT_TERMINAL_PROMPT="0")
+    return env, bool(os.environ.get("GITHUB_TOKEN"))
+
+
+def git(*args, env=None, check=True, repo=None):
+    r = subprocess.run(["git", "-C", str(repo or ROOT), "-c", f"user.name={GIT_NAME}", "-c", f"user.email={GIT_EMAIL}",
+                        *args], env=env, capture_output=True, text=True)
+    if check and r.returncode:
+        raise RuntimeError(f"git {args[0]} 실패 (exit {r.returncode}): {r.stderr.strip()[-300:]}")
+    return r
+
+
+def push_check():
+    """오래 걸리는 생성 전에: 토큰·저장소·쓰기 권한 확인 (안 되면 멈춤)."""
+    env, has_token = git_env()
+    if not has_token:
+        die("PUSH", error="GITHUB_TOKEN 없음",
+            hint="Kaggle Add-ons → Secrets 에 GITHUB_TOKEN(music-ytb Contents: Read and write) → 셀 첫 줄에서 os.environ 에 넣기")
+    try:
+        url = git("remote", "get-url", "origin").stdout.strip()
+    except RuntimeError as e:
+        die("PUSH", error=f"{ROOT} 가 git 사본이 아님: {e}", hint="셀의 git clone 줄로 받은 사본의 도구를 실행")
+    if REPO_SLUG not in url:
+        die("PUSH", error=f"origin 이 {REPO_SLUG} 가 아님: {url}", hint="셀의 git clone 줄 확인")
+    git("fetch", "-q", "origin", "main", env=env, check=False)
+    r = git("push", "--dry-run", "origin", "refs/remotes/origin/main:refs/heads/main", env=env, check=False)
+    if r.returncode:
+        die("PUSH", error="쓰기 권한 확인 실패: " + (r.stderr.strip().splitlines() or ["?"])[-1][:200],
+            hint="토큰의 Repository access 에 music-ytb · Permissions → Contents: Read and write")
+    log("PUSH", check="ok", repo=REPO_SLUG)
+
+
+def publish_files(name_dir, results, allow, include_flac=False):
+    """올릴 파일 [(원본, 저장소 안 상대 경로)] — 허용 목록 방식: reference/(원곡·원곡 악보)는 어떤 경우에도 들어가지 않는다."""
+    name_dir = Path(name_dir)
+    rel = Path(RESULTS_DIR) / name_dir.name
+    files = [(name_dir / f, rel / f) for f in NAME_FILES if (name_dir / f).is_file()]
+    for seed, rec in sorted(results.items()):
+        if rec["verdict"] not in allow:
+            continue
+        for f in SEED_FILES + (("audio.flac",) if include_flac else ()):
+            src = name_dir / seed / f
+            if src.is_file():
+                files.append((src, rel / seed / f))
+    assert not any("reference" in src.relative_to(name_dir).parts for src, _ in files)
+    return files
+
+
+def results_readme(name, results, allow, analysis):
+    """results/<이름>/README.md 내용."""
+    style = (analysis or {}).get("prompt", {}).get("style", "")
+    lines = [f"# {name}", "",
+             f"`tools/kaggle_music_yue2.py` {TOOL_VERSION} 로 만든 곡 ({datetime.now():%Y-%m-%d}). YuE2(m-a-p/YuE2-3B) 연주·작곡.",
+             "참고 곡이 있으면 그 분석을 글(프롬프트)로만 넘겼다 — 원곡 파일·원곡 악보·파일 이름은 이 저장소에 없다.",
+             "멜로디 검사는 경험칙이며 법적 판단이 아니다. 연구·교육용.", ""]
+    if style:
+        lines += ["## 프롬프트", "", "```", style, "```", ""]
+    lines += ["## 곡", "", "| 곡 | 길이 | 멜로디 검사 | 원곡과 같은 구간 (리듬까지 / 음정만) | 파일 |", "|---|---|---|---|---|"]
+    baseline = None
+    for seed, rec in sorted(results.items()):
+        m = rec.get("melody") or {}
+        baseline = rec.get("baseline_between_generated", baseline)
+        run = f"{m['run_rhythm']} / {m['run_pitch']}" if m else "-"
+        seconds = rec.get("seconds")
+        length = f"{int(seconds // 60)}:{int(seconds % 60):02d}" if seconds else "-"
+        if rec["verdict"] in allow:
+            link = f"[mp3]({seed}/audio.mp3) · [악보]({seed}/score.abc)"
+            status = rec["verdict_ko"]
+        else:
+            link = "—"
+            status = f"{rec['verdict_ko']} — 올리지 않음"
+        lines.append(f"| {seed} | {length} | {status} | {run} | {link} |")
+    lines.append("")
+    if baseline and baseline.get("pairs"):
+        lines.append(f"같은 프롬프트로 만든 곡끼리 겹친 최대 (우연히 겹치는 정도): 리듬까지 {baseline['run_rhythm']} / 음정만 {baseline['run_pitch']}.")
+    lines += [f"기준: 원곡과 리듬까지 같은 음정 변화가 연속 {FLAG_RUN_RHYTHM}개 이상, 또는 음정만 연속 {FLAG_RUN_PITCH}개 이상이면 '검토 필요'"
+              f" (같은 음 반복만인 구간은 빼고, 움직이는 음정 {MIN_MOVING}개 이상).", ""]
+    if analysis:
+        lib = analysis.get("librosa", {})
+        tags = analysis.get("tags", {})
+        sheet = analysis.get("sheetsage2", {})
+        evidence = "; ".join(f"{lb} {p}" for kind in ("genres", "moods", "instruments")
+                             for lb, p in tags.get(kind + "_evidence", []))
+        lines += ["## 참고 곡 분석 (숫자만)", "",
+                  f"- 길이 {lib.get('seconds')}초 · 템포 {lib.get('tempo_bpm')} BPM(librosa)"
+                  + (f" / {sheet.get('bpm')} BPM(SheetSage2)" if sheet.get("ok") else "")
+                  + f" · 조성 {lib.get('key')}(librosa)" + (f" / {sheet.get('key')}(SheetSage2)" if sheet.get("ok") else ""),
+                  f"- 태그(확률): {evidence}" if evidence else "- 태그 없음", ""]
+    return "\n".join(lines)
+
+
+def push_results(name_dir, results, allow, include_flac=False):
+    """허용된 곡만 저장소 results/<이름>/ 에 복사 → 커밋 → pull --rebase → push (재시도). → 0 성공."""
+    name_dir = Path(name_dir)
+    for seed, rec in results.items():  # README 의 길이 칸
+        run_json = name_dir / seed / "kaggle_run.json"
+        if run_json.is_file():
+            rec["seconds"] = json.loads(run_json.read_text(encoding="utf-8")).get("metrics", {}).get("seconds")
+    files = publish_files(name_dir, results, allow, include_flac)
+    songs = sorted({str(rel.parent.name) for _, rel in files if rel.name == "audio.mp3"})
+    skipped = sorted(s for s, r in results.items() if r["verdict"] not in allow)
+    log("PUSH", allow=",".join(sorted(allow)), songs=",".join(songs) or "-", skipped=",".join(skipped) or "-",
+        files=len(files))
+    if not songs:
+        log("PUSH", logging.WARNING, warning="올릴 곡이 없음", hint="검사 결과를 보고 --push-flagged / --push-unchecked")
+        return 1
+    env, _ = git_env()
+    for src, rel in files:
+        mb = src.stat().st_size / 1e6
+        if mb > MAX_PUSH_MB:
+            log("PUSH", logging.WARNING, warning="GitHub 한도에 가까워 뺌", file=rel, mb=round(mb, 1))
+            continue
+        (ROOT / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, ROOT / rel)
+    analysis = None
+    if (name_dir / "analysis.json").is_file():
+        analysis = json.loads((name_dir / "analysis.json").read_text(encoding="utf-8"))
+    dest = Path(RESULTS_DIR) / name_dir.name
+    (ROOT / dest / "README.md").write_text(results_readme(name_dir.name, results, allow, analysis), encoding="utf-8")
+    try:
+        git("add", "--", str(dest))
+        if git("diff", "--cached", "--quiet", check=False).returncode == 0:
+            log("PUSH", status="바뀐 것 없음")
+            return 0
+        git("commit", "-q", "-m", f"음악: {name_dir.name} — {len(songs)}곡 올림 (kaggle_music_yue2 {TOOL_VERSION})"
+            + (f", 안 올림 {len(skipped)}곡" if skipped else ""))
+    except RuntimeError as e:
+        log("PUSH", logging.ERROR, error=str(e), hint="push --name 으로 다시")
+        return 1
+    for attempt in range(1, PUSH_TRIES + 1):
+        pull = git("pull", "-q", "--rebase", "origin", "main", env=env, check=False)
+        push = git("push", "-q", "origin", "HEAD:main", env=env, check=False)
+        if pull.returncode == 0 and push.returncode == 0:
+            head = git("rev-parse", "--short", "HEAD").stdout.strip()
+            log("PUSH", status="ok", commit=head, path=dest, songs=len(songs))
+            return 0
+        err = (push.stderr or pull.stderr).strip().splitlines()
+        log("PUSH", logging.WARNING, attempt=attempt, error=(err[-1] if err else "?")[:200])
+        time.sleep(2 ** attempt)
+    log("PUSH", logging.ERROR, error="올리기 실패", hint=f"결과는 {name_dir} 에 있음 → push --name {name_dir.name} 로 다시")
+    return 1
+
+
+def push_allow(args):
+    return set(PUSH_DEFAULT) | ({"review"} if args.push_flagged else set()) | ({"unchecked"} if args.push_unchecked else set())
+
+
 # ------------------------------------------------------------------ 하위 프로세스 (Kaggle 기본 파이썬)
 def stream(proc, prefix, sink):
     for line in proc.stdout:  # text=True → '\r' 진행 줄도 한 줄씩 (공식 Progress 는 파이프에서 5초에 한 줄)
         sink(f"{prefix} | {line.rstrip()}")
+
+
+def run_streamed(cmd, env, prefix):
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    stream(proc, prefix, LOG.info)
+    return proc.wait()
 
 
 def worker_cmd(args, gpu_seeds, fetch_only=False):
@@ -567,58 +1204,89 @@ def run(args):
     t0 = time.time()
     if not NAME_RE.fullmatch(args.name):
         die("INPUT", error=f"이름 {args.name!r}", hint="영문·숫자·_.- 만 (예: bgm-lofi-01)")
-    if not args.style.strip():
-        die("INPUT", error="스타일이 비었음", hint='--style "calm piano, soft drums, 80 BPM"')
+    ref = None
+    if args.ref:
+        try:
+            ref = find_reference(args.ref)
+        except (FileNotFoundError, ValueError) as e:
+            die("INPUT", error=str(e), hint="--ref /kaggle/input/<데이터셋>/<파일> 또는 --ref auto")
+    if not args.style.strip() and not ref:
+        die("INPUT", error="스타일이 비었음", hint='--style "calm piano, soft drums, 80 BPM" 또는 --ref 로 참고 곡')
     try:
-        seeds = parse_seeds(args.seeds)
+        seeds = resolve_seeds(args.seeds, args.count, bool(ref))
         if args.mode == "instrumental":
             section_lyrics(args.sections)
     except ValueError as e:
-        die("INPUT", error=str(e), hint="--seeds 1,2 · --sections Intro,Verse,Chorus,Outro")
+        die("INPUT", error=str(e), hint="--seeds 1,2 또는 --count 4 · --sections Intro,Verse,Chorus,Outro")
     if args.mode == "song":
         if not args.lyrics_file or not Path(args.lyrics_file).is_file():
             die("INPUT", error="노래 모드는 가사 파일이 필요", hint="--lyrics-file lyrics.txt ([Verse]·[Chorus] 태그 + 가사)")
         if not Path(args.lyrics_file).read_text(encoding="utf-8").strip():
             die("INPUT", error="가사 파일이 비었음", hint="[Verse] 아래에 가사")
     rows = setup(force=args.reinstall)
+    if args.push:
+        push_check()
     usable = [g["index"] for g in rows]
     if args.gpus != "all":
         want = [int(x) for x in args.gpus.split(",") if x.strip()]
         usable = [i for i in want if i in usable]
         if not usable:
             die("INPUT", error=f"--gpus {args.gpus} 가 없음", hint=f"있는 GPU: {[g['index'] for g in rows]}")
+    name_dir = Path(args.out) / args.name
+
+    # 참고 곡 → 분석 → 프롬프트
+    style_from = "--style"
+    if ref:
+        if (name_dir / "analysis.json").is_file() and not args.reanalyze:
+            log("ANALYZE", status="skip", reason="이미 분석함 (--reanalyze 로 다시)", path=name_dir / "analysis.json")
+        else:
+            if args.reanalyze and (name_dir / "reference").exists():
+                shutil.rmtree(name_dir / "reference")
+            cmd = [str(VENV_PY), str(Path(__file__).resolve()), "_analyze", "--ref", str(ref), "--name", args.name,
+                   "--out", args.out, "--style-extra", args.style_extra, "--log-level", args.log_level]
+            if run_streamed(cmd, worker_env(usable[0]), "analyze"):
+                die("ANALYZE", error="참고 곡 분석 실패", hint="위 analyze 줄의 오류 확인")
+        analysis = json.loads((name_dir / "analysis.json").read_text(encoding="utf-8"))
+        if args.style.strip():
+            style_from = "--style (참고 곡 분석은 멜로디 검사에만)"
+        else:
+            args.style, style_from = analysis["prompt"]["style"], "참고 곡 분석"
+    log("PROMPT", style=args.style, source=style_from)
+
     plan = assign_seeds(seeds, usable)
     log("RUN", mode=args.mode, name=args.name, seeds=",".join(map(str, seeds)),
-        gpus=";".join(f"{g}:{','.join(map(str, s))}" for g, s in plan.items()), out=Path(args.out) / args.name)
+        gpus=";".join(f"{g}:{','.join(map(str, s))}" for g, s in plan.items()), out=name_dir)
     if len(plan) > 1 and ram_gib() < 24:
         log("RUN", logging.WARNING, warning="RAM 이 적어 두 GPU 동시 로드가 빠듯함", ram_gib=round(ram_gib(), 1),
             hint="멈추면 --gpus 0")
-    sink = LOG.info
     # 모델을 먼저 한 번 받는다 (두 프로세스가 같은 7.8GB 를 동시에 받지 않게)
     first = next(iter(plan))
-    proc = subprocess.Popen(worker_cmd(args, plan[first], fetch_only=True), env=worker_env(first),
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    stream(proc, "fetch", sink)
-    if proc.wait():
+    if run_streamed(worker_cmd(args, plan[first], fetch_only=True), worker_env(first), "fetch"):
         die("LOAD", error="모델 받기 실패", hint="위 fetch 줄의 [LOAD] 오류 확인")
     procs, threads = [], []
     for gpu, gpu_seeds in plan.items():
         p = subprocess.Popen(worker_cmd(args, gpu_seeds), env=worker_env(gpu),
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-        t = threading.Thread(target=stream, args=(p, f"gpu{gpu}", sink), daemon=True)
+        t = threading.Thread(target=stream, args=(p, f"gpu{gpu}", LOG.info), daemon=True)
         t.start()
         procs.append((gpu, p))
         threads.append(t)
     codes = {gpu: p.wait() for gpu, p in procs}
     for t in threads:
         t.join()
-    files = sorted(str(p) for p in (Path(args.out) / args.name).glob("seed-*/audio.flac"))
+
+    # 멜로디 검사 → 올리기
+    results = run_similarity(name_dir)
+    files = sorted(str(p) for p in name_dir.glob("seed-*/audio.flac"))
+    counts = {v: sum(1 for r in results.values() if r["verdict"] == v) for v in VERDICT_KO}
     log("DONE", minutes=round((time.time() - t0) / 60, 1), files=len(files),
+        verdicts=",".join(f"{VERDICT_KO[v]}={n}" for v, n in counts.items() if n) or "-",
         exit=",".join(f"gpu{g}={c}" for g, c in codes.items()),
         hint="-" if not any(codes.values()) else "실패한 GPU 의 [GEN] 오류 줄 확인")
     for f in files:
         log("DONE", file=f)
-    return 1 if any(codes.values()) else 0
+    push_rc = push_results(name_dir, results, push_allow(args), args.push_flac) if args.push else 0
+    return 1 if any(codes.values()) or push_rc else 0
 
 
 # ------------------------------------------------------------------ 명령줄
@@ -629,7 +1297,7 @@ def add_gen_args(p):
     p.add_argument("--sections", default=DEFAULT_SECTIONS, help=f"instrumental: 계획 섹션 (기본 {DEFAULT_SECTIONS} — 늘리면 길어짐)")
     p.add_argument("--plan-mode", choices=("full", "melody"), default="full", help="instrumental: 악보에 화음까지(full) / 선율만")
     p.add_argument("--cot", choices=("full", "melody", "off"), default="full", help="song: 계획 방식 (공식 기본 full)")
-    p.add_argument("--seeds", default="1", help="쉼표로 여러 개 — GPU 마다 나눠 동시에")
+    p.add_argument("--seeds", default=None, help="쉼표로 여러 개 — GPU 마다 나눠 동시에 (없으면 1..--count)")
     p.add_argument("--name", default=None, help="결과 폴더 이름 (기본: 모드-날짜시각)")
     p.add_argument("--out", default=str(OUT))
     p.add_argument("--backend", choices=("torch", "torch-eager"), default="torch",
@@ -642,11 +1310,23 @@ def add_gen_args(p):
     p.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING"), default="INFO")
 
 
+def add_push_args(p):
+    p.add_argument("--push-flagged", action="store_true", help="멜로디 검사 '검토 필요' 곡도 올림")
+    p.add_argument("--push-unchecked", action="store_true", help="멜로디 검사를 못 한 곡도 올림")
+    p.add_argument("--push-flac", action="store_true", help="flac 도 올림 (곡당 약 30MB)")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="YuE2 노래·연주곡 — Kaggle GPU (연구·교육용)")
     sub = ap.add_subparsers(dest="command", required=True)
-    r = sub.add_parser("run", help="설치(처음 한 번) → 생성")
+    r = sub.add_parser("run", help="설치(처음 한 번) → [참고 곡 분석] → 생성 → 멜로디 검사 → [저장소에 올리기]")
     add_gen_args(r)
+    r.add_argument("--ref", help="참고 곡 파일, 또는 auto (= /kaggle/input 아래 오디오 파일 하나)")
+    r.add_argument("--count", type=int, default=None, help=f"곡 수 (--seeds 가 없을 때, 기본: 참고 곡이면 {REF_COUNT} 아니면 1)")
+    r.add_argument("--style-extra", default="", help='참고 곡 프롬프트 앞에 더할 말 (예: "J-pop band")')
+    r.add_argument("--reanalyze", action="store_true", help="같은 이름으로 분석한 것이 있어도 다시")
+    r.add_argument("--push", action="store_true", help=f"결과를 {REPO_SLUG} {RESULTS_DIR}/<이름>/ 에 (GITHUB_TOKEN 필요)")
+    add_push_args(r)
     r.add_argument("--gpus", default="all", help="쓸 GPU (예: 0 또는 0,1)")
     r.add_argument("--reinstall", action="store_true", help="venv 를 지우고 다시 설치")
     s = sub.add_parser("setup", help="설치·GPU 점검만")
@@ -654,20 +1334,47 @@ def main(argv=None):
     s.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING"), default="INFO")
     c = sub.add_parser("check", help="(venv 안) GPU 점검")
     c.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING"), default="INFO")
+    for cmd_name, help_text in (("similarity", "이미 만든 곡들의 멜로디 검사를 다시"), ("push", "이미 만든 곡을 저장소에")):
+        q = sub.add_parser(cmd_name, help=help_text)
+        q.add_argument("--name", required=True)
+        q.add_argument("--out", default=str(OUT))
+        q.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING"), default="INFO")
+        if cmd_name == "push":
+            add_push_args(q)
+    a = sub.add_parser("_analyze", help=argparse.SUPPRESS)
+    a.add_argument("--ref", required=True)
+    a.add_argument("--name", required=True)
+    a.add_argument("--out", default=str(OUT))
+    a.add_argument("--style-extra", default="")
+    a.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING"), default="INFO")
     w = sub.add_parser("_worker", help=argparse.SUPPRESS)
     add_gen_args(w)
     w.add_argument("--fetch-only", action="store_true")
     args = ap.parse_args(argv)
     if args.command == "run":
-        args.name = args.name or f"{'bgm' if args.mode == 'instrumental' else 'song'}-{datetime.now():%Y%m%d-%H%M%S}"
+        prefix = "bgm" if args.mode == "instrumental" else "song"
+        args.name = args.name or f"{prefix}-{datetime.now():%Y%m%d-%H%M%S}"
         setup_logging(args.log_level, Path(args.out) / "music.log")
         return run(args)
+    if args.command in ("similarity", "push"):
+        setup_logging(args.log_level, Path(args.out) / "music.log")
+        name_dir = Path(args.out) / args.name
+        if not name_dir.is_dir():
+            die("INPUT", error=f"{name_dir} 없음", hint="run 에서 쓴 --name 그대로")
+        results = run_similarity(name_dir)
+        if args.command == "push":
+            push_check()
+            return push_results(name_dir, results, push_allow(args), args.push_flac)
+        return 0
     setup_logging(args.log_level)
     if args.command == "setup":
         setup(force=args.reinstall)
         return 0
     if args.command == "check":
         return check()
+    if args.command == "_analyze":
+        os.environ.setdefault("HF_HOME", str(HF_HOME))
+        return analyze(args)
     return worker(args)
 
 
