@@ -512,6 +512,28 @@ class TestEnv(unittest.TestCase):
             self.assertEqual(results["seed-1"]["verdict"], "review")
             self.assertEqual({results[s]["verdict"] for s in ("seed-2", "seed-3", "seed-4")}, {"pass"})
 
+    def test_same_name_other_reference_stops(self):
+        """v1.3: 같은 --name 에 다른 곡이면 예전 분석을 쓰지 않고 멈춤 · 같은 곡이면 분석을 건너뜀."""
+        gpus = [dict(index=0, name="T4", mem_mib=15360, driver="560", cap=(7, 5))]
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            ref = d / "song.mp3"
+            ref.write_bytes(b"new song")
+            name_dir = d / "out" / "bgm-x"
+            name_dir.mkdir(parents=True)
+            argv = ["run", "--ref", str(ref), "--name", "bgm-x", "--out", str(d / "out")]
+            (name_dir / "analysis.json").write_text(json.dumps({"reference": {"sha256": "0" * 64}, "prompt": {"style": "x"}}))
+            with mock.patch.object(km, "setup", return_value=gpus), mock.patch.object(km, "setup_logging"), \
+                    mock.patch.object(km, "run_streamed", return_value=1) as streamed:
+                with self.assertRaises(SystemExit):
+                    km.main(argv)
+                streamed.assert_not_called()  # 분석도 생성도 시작하지 않음
+                (name_dir / "analysis.json").write_text(json.dumps({"reference": {"sha256": km.sha256_file(ref)},
+                                                                    "prompt": {"style": "pop"}}))
+                with self.assertRaises(SystemExit):  # 여기서는 가짜 모델 받기가 실패해서 멈춤
+                    km.main(argv)
+                self.assertEqual([c.args[2] for c in streamed.call_args_list], ["fetch"])  # 분석은 건너뜀
+
     def test_cli_parses_ref_run(self):
         with mock.patch.object(km, "run", return_value=0) as run, mock.patch.object(km, "setup_logging"):
             km.main(["run", "--ref", "auto", "--count", "3", "--style-extra", "J-pop band", "--push", "--name", "x"])

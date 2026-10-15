@@ -6,8 +6,9 @@
 
 | 파일 | 하는 일 |
 |---|---|
-| `tools/kaggle_music_yue2.py` (v1.2) | 설치(처음 한 번) → [참고 곡 분석] → 생성 → 멜로디 검사 → [저장소에 올리기] |
-| `tools/tests/test_kaggle_music_yue2.py` | GPU·네트워크 없이 도는 시험 38개: `python3 -m unittest tools.tests.test_kaggle_music_yue2 -v` |
+| `tools/kaggle_music_panel.py` (v1.0) | 노트북 버튼: **[곡 올리기]** → 설정 → **[▶ 비슷한 곡 만들기]** → 결과 표·플레이어 |
+| `tools/kaggle_music_yue2.py` (v1.3) | 설치(처음 한 번) → [참고 곡 분석] → 생성 → 멜로디 검사 → [저장소에 올리기] (버튼이 이것을 부름) |
+| `tools/tests/` | GPU·네트워크 없이 도는 시험 48개: `python3 -m unittest tools.tests.test_kaggle_music_yue2 tools.tests.test_kaggle_music_panel -v` |
 | `results/<이름>/` | 올라간 곡 — `seed-N/audio.mp3`(320k)·`score.abc`(AI 악보)·`kaggle_run.json`·`similarity.json`, `analysis.json`·`prompt.txt`·`README.md` |
 
 ## 처음 한 번 준비
@@ -18,27 +19,28 @@
    - Repository access: **Only select repositories** → `yeomin1024/music-ytb` (yeomin1024-ytb 용 토큰이 있으면 그 토큰을 Edit 해서 music-ytb 를 더해도 된다)
    - Permissions → Repository permissions → **Contents: Read and write**
    - Kaggle 노트북 위 메뉴 **Add-ons → Secrets → Add Secret** → Label `GITHUB_TOKEN`, Value 토큰 → 이 노트북에 연결(체크)
-3. **참고 곡 올리기**: 오른쪽 **+ Add Input → Upload** → 곡 파일(mp3·wav·flac·m4a) 하나 → 데이터셋은 **Private** 그대로. 다른 곡으로 바꿀 때는 그 입력을 빼고 새로 올린다 (`--ref auto` 는 오디오 파일이 하나일 때만)
+> ⚠️ 참고 곡 파일은 **이 저장소(공개)에 올리지 않는다**. 도구도 원곡 파일·원곡을 받아 적은 악보·파일 이름은 올리지 않는다 (허용 목록 방식, 시험으로 확인). 버튼으로 올린 원곡과 바꾼 wav 는 `/tmp/yue2/` 에만 두어 Kaggle 출력(`/kaggle/working`)에도 남지 않는다.
 
-> ⚠️ 참고 곡 파일은 **이 저장소(공개)에 올리지 않는다**. 도구도 원곡 파일·원곡을 받아 적은 악보·파일 이름은 올리지 않는다 (허용 목록 방식, 시험으로 확인).
-
-## Kaggle 셀 — 참고 곡 하나 → 비슷한 분위기 4곡 → 검사 → 저장소
+## 노트북 셀 (이것 하나만 복사해서 실행)
 
 ```python
-import os
+import os, sys, importlib
 from kaggle_secrets import UserSecretsClient
 os.environ["GITHUB_TOKEN"] = UserSecretsClient().get_secret("GITHUB_TOKEN")   # 결과 올리기용 (값은 출력하지 않음)
 !test -d /kaggle/working/music-ytb || git clone -q --depth 1 https://github.com/yeomin1024/music-ytb.git /kaggle/working/music-ytb
 !cd /kaggle/working/music-ytb && git config core.fileMode false && git fetch -q origin main && git reset -q --hard origin/main
-
-!python /kaggle/working/music-ytb/tools/kaggle_music_yue2.py run --ref auto --count 4 --name jpop-like-01 \
-    --style-extra "J-pop band" --push
-
-from pathlib import Path
-from IPython.display import Audio, display
-for p in sorted(Path("/kaggle/working/music/jpop-like-01").glob("seed-*/audio.mp3")):
-    print(p, Path(p.parent, "similarity.json").read_text(encoding="utf-8")[:120]); display(Audio(str(p)))
+sys.path.insert(0, "/kaggle/working/music-ytb/tools")
+import kaggle_music_panel; importlib.reload(kaggle_music_panel).panel()
 ```
+
+셀 아래에 버튼이 나온다:
+1. **[곡 올리기]** → 곡 파일 하나 (**mp3 권장** — 큰 wav 는 노트북 업로드 한도에 걸릴 수 있다. 올리면 옆에 이름·크기가 나옴)
+2. 설정 — **이름**(비우면 `ref-날짜시각`, 영문·숫자·`_.-`) · **장르 더하기**(예: `J-pop band` — 태그 모델에 없는 장르) · **곡 수**(기본 4) · **통과한 곡 저장소에 올리기**(기본 켬)
+3. **[▶ 비슷한 곡 만들기]** → 아래 칸에 로그가 흐르고(같은 내용이 `/kaggle/working/music/panel.log` 에도), 끝나면 곡마다 길이·멜로디 검사 결과·플레이어와 프롬프트
+- 실행 중에는 버튼이 잠긴다. 멈추려면 Kaggle 의 셀 멈춤(■) — GPU 작업 프로세스까지 함께 멈춘다.
+- 같은 이름으로 다시 누르면 같은 곡은 분석을 건너뛰고 곡만 더 만든다. **다른 곡인데 이름이 같으면 멈춘다** (예전 분석을 잘못 쓰지 않게) → 이름을 바꾼다.
+
+버튼 대신 명령으로: `!python /kaggle/working/music-ytb/tools/kaggle_music_yue2.py run --ref <곡 파일> --count 4 --name jpop-like-01 --style-extra "J-pop band" --push` (`--ref auto` = `+ Add Input → Upload` 로 올린 `/kaggle/input` 아래 오디오 파일 하나)
 
 순서 (로그 단계):
 1. `[SETUP]`·`[CHECK]` — 세션마다 처음 한 번 설치(몇 분)·GPU 점검. 같은 세션에서 다시 돌리면 건너뜀
@@ -103,7 +105,9 @@ for p in sorted(Path("/kaggle/working/music/jpop-like-01").glob("seed-*/audio.mp
 | 로그 | 할 일 |
 |---|---|
 | `[ENV] … GPU 없음` · `torch 2.10 이 지원하지 않음` | Accelerator 를 **GPU T4 x2** 로 |
-| `[INPUT] … 오디오 파일이 없음/여러 개` | + Add Input → Upload 로 곡 하나만, 또는 `--ref /kaggle/input/<데이터셋>/<파일>` |
+| `[PANEL] 먼저 [곡 올리기]로…` (올렸는데도) | 파일이 커서 업로드가 실패한 것 → mp3 로 다시 |
+| `[INPUT] … 다른 참고 곡으로 이미 분석함` | 이름을 바꾸거나 명령에 `--reanalyze` |
+| `[INPUT] … 오디오 파일이 없음/여러 개` (명령 `--ref auto`) | + Add Input → Upload 로 곡 하나만, 또는 `--ref /kaggle/input/<데이터셋>/<파일>` |
 | `[PUSH] … GITHUB_TOKEN 없음` · `쓰기 권한 확인 실패` | 준비 2번 (토큰 저장소 범위에 music-ytb, Contents: Read and write, 노트북에 Secret 연결) |
 | `[CHECK] … ok=False` | 이 GPU 에서 공식 BF16 경로가 안 됨 → 대안: [yue2.cpp](https://github.com/ServeurpersoCom/yue2.cpp)(GGUF, 비공식) |
 | `[LOAD] … 401/403/gated` | Hugging Face 토큰이 필요한 모델 → Secrets 에 `HF_TOKEN` 추가, 셀에서 `os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")` |

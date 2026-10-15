@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# VERSION: v1.2 — 2026-10-15 — 사용자 지시 "내가 노래 하나 업로드하면 비슷한 느낌의 노래 여러 개 만드는 걸로 수정해봐 … 그리고 결과 음악은
-#          저장소에 올리고" (앞 대화: "표절 논란 없어야하니까 멜로디는 달라야하고 악기 구성은 비슷해도되고 조금 달라도 되고"):
-#          참고 곡 분석(--ref) → 스타일 프롬프트 → 여러 곡(--count) → 원곡과 멜로디 비교 → 통과한 곡만 music-ytb results/ 에 (--push)
+# VERSION: v1.3 — 2026-10-15 — 사용자 지시 "업로드 버튼 만들어서 하도록 수정해": 노트북 버튼 패널(tools/kaggle_music_panel.py)이
+#          이 도구를 부른다. 같은 이름에 다른 곡이면 멈춤(예전 분석을 잘못 쓰지 않게), 원곡 wav 는 /tmp 에만
+#          (v1.2: 참고 곡 분석(--ref) → 스타일 프롬프트 → 여러 곡(--count) → 원곡과 멜로디 비교 → 통과한 곡만 results/ 에 (--push))
 r"""
 YuE2 (m-a-p/YuE2-3B) 로 노래·연주곡을 Kaggle GPU 에서 만든다.  ※ 연구·교육용 도구. Kaggle 실제 GPU 실행은 아직 검증 전.
 
 Kaggle 노트북 — Settings → Accelerator: **GPU T4 x2**, Internet: **On**. 셀 전체는 README.md.
 
-  # 참고 곡 하나(+ Add Input → Upload) → 비슷한 분위기의 연주곡 4곡 → 멜로디 검사 → 통과한 곡만 저장소 results/ 에
-  !python /kaggle/working/music-ytb/tools/kaggle_music_yue2.py run --ref auto --count 4 --push
+  # 버튼으로 (곡 올리기 → 비슷한 곡 만들기) — tools/kaggle_music_panel.py
+  import sys, importlib; sys.path.insert(0, "/kaggle/working/music-ytb/tools")
+  import kaggle_music_panel; importlib.reload(kaggle_music_panel).panel()
+
+  # 명령으로: 참고 곡 하나 → 비슷한 분위기의 연주곡 4곡 → 멜로디 검사 → 통과한 곡만 저장소 results/ 에
+  !python /kaggle/working/music-ytb/tools/kaggle_music_yue2.py run --ref <곡 파일 | auto> --count 4 --push
 
   # 프롬프트만으로
   !python /kaggle/working/music-ytb/tools/kaggle_music_yue2.py run --mode instrumental \
@@ -74,6 +78,10 @@ T4(Turing, 연산 능력 7.5)에서 공식 코드가 그대로는 멈추거나 �
 #          mp3 192k → 320k(저장소에 올리는 파일이라 음질 우선), --seeds 기본 = 1..--count(--ref 면 4, 아니면 1).
 #          장·단조는 SheetSage2 값만 프롬프트에 (librosa 크로마 추정은 합성 A단조를 A장조로 읽어 기록만).
 #          위험 관련 값 변화 없음 (생성 설정·T4 패치 그대로). 영향: setup, run, worker_cmd, generate_one(mp3), main
+#   v1.3 — 2026-10-15 — 업로드 버튼 패널(새 파일 tools/kaggle_music_panel.py v1.0)이 run --ref 를 부름 (사용자 지시).
+#          run: 같은 --name 의 analysis.json 이 다른 참고 곡(sha256 다름)이면 멈춤 — 예전엔 분석을 건너뛰어 다른 곡의 프롬프트·
+#          원곡 악보로 만들고 검사할 수 있었음. analyze: 원곡을 바꾼 wav 를 <이름>/reference/ref.wav(/kaggle/working — Kaggle 출력에
+#          저장됨) 대신 WORK/ref_audio/<이름>.wav(/tmp)에. 생성·검사·올리기 동작은 그대로. 영향: run, analyze
 import argparse
 import functools
 import hashlib
@@ -92,7 +100,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-TOOL_VERSION = "v1.2"
+TOOL_VERSION = "v1.3"
 ROOT = Path(__file__).resolve().parent.parent
 
 # ------------------------------------------------------------------ 고정값 (바꾸면 VERSION 을 올리고 CHANGELOG 에 적는다)
@@ -729,7 +737,8 @@ def ast_probs(y16, device):
 
 
 def analyze(args):
-    """(venv) 참고 곡 → <이름>/analysis.json·prompt.txt (공개용, 파일 이름 없음) + <이름>/reference/ (로컬만: ref.wav·받아 적은 악보)."""
+    """(venv) 참고 곡 → <이름>/analysis.json·prompt.txt (공개용, 파일 이름 없음) + <이름>/reference/transcription (로컬만: 받아 적은 악보).
+    원곡을 바꾼 wav 는 WORK/ref_audio/ (/tmp)."""
     import torch
     import librosa
     name_dir = Path(args.out) / args.name
@@ -737,7 +746,8 @@ def analyze(args):
     ref_dir.mkdir(parents=True, exist_ok=True)
     src = Path(args.ref)
     t0 = time.time()
-    wav = ref_dir / "ref.wav"
+    wav = WORK / "ref_audio" / f"{args.name}.wav"  # 원곡 사본은 /tmp 에만 — Kaggle 출력(/kaggle/working)에 남기지 않음
+    wav.parent.mkdir(parents=True, exist_ok=True)
     if shutil.which("ffmpeg"):
         r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-ac", "2", "-ar", "44100",
                             str(wav)])
@@ -1237,8 +1247,13 @@ def run(args):
     # 참고 곡 → 분석 → 프롬프트
     style_from = "--style"
     if ref:
+        ref_sha = sha256_file(ref)
         if (name_dir / "analysis.json").is_file() and not args.reanalyze:
-            log("ANALYZE", status="skip", reason="이미 분석함 (--reanalyze 로 다시)", path=name_dir / "analysis.json")
+            old_sha = json.loads((name_dir / "analysis.json").read_text(encoding="utf-8")).get("reference", {}).get("sha256")
+            if old_sha != ref_sha:
+                die("INPUT", error=f"이름 {args.name} 은 다른 참고 곡으로 이미 분석함",
+                    hint="이름을 바꾸거나(--name) --reanalyze", old=str(old_sha)[:12], new=ref_sha[:12])
+            log("ANALYZE", status="skip", reason="같은 곡을 이미 분석함 (--reanalyze 로 다시)", path=name_dir / "analysis.json")
         else:
             if args.reanalyze and (name_dir / "reference").exists():
                 shutil.rmtree(name_dir / "reference")
