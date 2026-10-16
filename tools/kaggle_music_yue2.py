@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# VERSION: v1.3 — 2026-10-15 — 사용자 지시 "업로드 버튼 만들어서 하도록 수정해": 노트북 버튼 패널(tools/kaggle_music_panel.py)이
-#          이 도구를 부른다. 같은 이름에 다른 곡이면 멈춤(예전 분석을 잘못 쓰지 않게), 원곡 wav 는 /tmp 에만
-#          (v1.2: 참고 곡 분석(--ref) → 스타일 프롬프트 → 여러 곡(--count) → 원곡과 멜로디 비교 → 통과한 곡만 results/ 에 (--push))
+# VERSION: v1.4 — 2026-10-16 — 사용자 지시 "음악 하나랑 … 멘트와 … 사진 … 트랙을 분리한 후 각각 멜로디, 이펙트 등을 분석하고 변형해서
+#          내 멘트와 이미지 종합해서 음악 하나 … 가사 여부는 내가 체크" + "멘트·사진은 내가 클로드한테 물어보고 결과 넣을테니까 … 선택 2
+#          (가사 초안 → 고친 뒤 생성)는 그렇게 해": 분석에 Demucs 트랙 분리(6트랙)·트랙별 수치·멜로디 특징·곡 구성을 더하고,
+#          analyze 명령이 'Claude 에게 보낼 글'을 만든다 (멘트 포함, 사진은 사용자가 Claude 대화에 첨부)
+#          (v1.3: 업로드 버튼 패널 · v1.2: 참고 곡 → 비슷한 분위기 여러 곡 → 멜로디 검사 → 통과한 곡만 results/ 에)
 r"""
 YuE2 (m-a-p/YuE2-3B) 로 노래·연주곡을 Kaggle GPU 에서 만든다.  ※ 연구·교육용 도구. Kaggle 실제 GPU 실행은 아직 검증 전.
 
@@ -14,6 +16,12 @@ Kaggle 노트북 — Settings → Accelerator: **GPU T4 x2**, Internet: **On**. 
 
   # 명령으로: 참고 곡 하나 → 비슷한 분위기의 연주곡 4곡 → 멜로디 검사 → 통과한 곡만 저장소 results/ 에
   !python /kaggle/working/music-ytb/tools/kaggle_music_yue2.py run --ref <곡 파일 | auto> --count 4 --push
+
+  # 멘트·사진까지 (버튼 패널이 하는 일): ① 분석 + Claude 에게 보낼 글 → ② Claude 답(STYLE·SECTIONS·LYRICS) → ③ 생성
+  !python …/kaggle_music_yue2.py analyze --ref <곡> --name my-01 --comment-file comment.txt [--lyrics]
+      → /kaggle/working/music/my-01/claude_request.txt (복사해 Claude 에, 사진 첨부)
+  !python …/kaggle_music_yue2.py run --ref <곡> --name my-01 --style "<STYLE>" --sections "<SECTIONS>" \
+      [--mode song --lyrics-file lyrics.txt] --count 4 --push
 
   # 프롬프트만으로
   !python /kaggle/working/music-ytb/tools/kaggle_music_yue2.py run --mode instrumental \
@@ -27,7 +35,10 @@ Kaggle 노트북 — Settings → Accelerator: **GPU T4 x2**, Internet: **On**. 
 참고 곡 → 비슷한 분위기 (--ref 파일 | auto = /kaggle/input 아래 오디오 파일 하나)
   원곡 소리는 YuE2 에 넣지 않는다. 분석 결과를 '글(스타일 프롬프트)'로만 넘기므로 멜로디는 모델이 새로 쓴다.
   1) 분석: librosa(템포·조성·음량) · AudioSet 태그 모델 AST(장르·분위기·악기, 확률을 로그에) ·
-     SheetSage2(원곡 멜로디를 악보로 받아 적기 — 검사용, YuE2 팀의 공식 모델, 템포·조성도 여기 값을 먼저 씀)
+     SheetSage2(원곡 멜로디를 악보로 받아 적기 — 검사용, YuE2 팀의 공식 모델, 템포·조성도 여기 값을 먼저 씀) ·
+     Demucs htdemucs_6s 트랙 분리(보컬·드럼·베이스·기타·피아노·그 밖) → 트랙별 비중·밝기·스테레오 폭·다이내믹·잔향/지속·거친 정도
+     (music_analysis.stem_features — 근사치) · 멜로디 특징(음역·순차/도약·리듬 밀도 — 음표는 내보내지 않음) · 곡 구성.
+     분리한 원곡 트랙은 메모리에서 수치만 재고 버린다 (파일로 남기지 않고, 결과 곡에 섞지 않음 — 섞으면 샘플링)
   2) 프롬프트 = [--style-extra] + 장르 + 분위기 + 악기 + 장·단조(SheetSage2 가 될 때만) + BPM. 곡 이름·가수 이름은 넣지 않는다.
      --style 을 주면 그것을 씀
   3) --count 곡 (시드 1..N)
@@ -82,6 +93,11 @@ T4(Turing, 연산 능력 7.5)에서 공식 코드가 그대로는 멈추거나 �
 #          run: 같은 --name 의 analysis.json 이 다른 참고 곡(sha256 다름)이면 멈춤 — 예전엔 분석을 건너뛰어 다른 곡의 프롬프트·
 #          원곡 악보로 만들고 검사할 수 있었음. analyze: 원곡을 바꾼 wav 를 <이름>/reference/ref.wav(/kaggle/working — Kaggle 출력에
 #          저장됨) 대신 WORK/ref_audio/<이름>.wav(/tmp)에. 생성·검사·올리기 동작은 그대로. 영향: run, analyze
+#   v1.4 — 2026-10-16 — 트랙 분리·트랙별 분석·Claude 에게 보낼 글 (사용자 지시). 새것: EXTRA_PACKAGES 에 demucs==4.1.0(MIT,
+#          torchaudio 없이 동작), separate_stems(htdemucs_6s, 메모리에서만), _analyze 에 stems·melody_features·form,
+#          ensure_analysis(run 과 같이 씀), analyze 명령(--comment-file·--lyrics → claude_request.txt). 순수 계산은 새 파일
+#          tools/music_analysis.py v1.0. 생성·검사·올리기·T4 패치는 그대로. 설치 목록이 바뀌어 venv 를 한 번 다시 만든다.
+#          영향: setup(설치 목록), _analyze, run(분석 부분 → ensure_analysis), main
 import argparse
 import functools
 import hashlib
@@ -100,7 +116,10 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-TOOL_VERSION = "v1.3"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import music_analysis as ma  # noqa: E402 — 표준 라이브러리만 (numpy 는 함수 안에서)
+
+TOOL_VERSION = "v1.4"
 ROOT = Path(__file__).resolve().parent.parent
 
 # ------------------------------------------------------------------ 고정값 (바꾸면 VERSION 을 올리고 CHANGELOG 에 적는다)
@@ -114,7 +133,9 @@ EXTRA_PACKAGES = (
     "librosa==0.11.0",  # 참고 곡 분석 (템포·조성·음량)
     # SheetSage2 가 쓰는 것 — YuE2-Turbo(server extra)가 같은 YuE2 환경에서 SheetSage2 를 돌릴 때 고정한 버전
     "mir_eval==0.8.2", "pretty_midi==0.2.10", "mido==1.3.3", "scipy==1.15.3",
+    "demucs==4.1.0",  # 트랙 분리 (MIT, 2026-07 배포 — torchaudio 없이 동작, 가중치는 HF adefossez/… 또는 dl.fbaipublicfiles.com)
 )
+DEMUCS_MODEL = "htdemucs_6s"  # drums·bass·other·vocals·guitar·piano
 SKILL_COMMIT = "1647252d68b70cbead046ffd3f7caf036dde47ee"  # YuE main 2026-10-06
 SKILL_URL = ("https://raw.githubusercontent.com/multimodal-art-projection/YuE/{commit}/"
              "skills/yue2-music/instrumental/{path}")
@@ -709,6 +730,38 @@ def audio_features(wav):
     return feats, key, tempo, y, sr
 
 
+def separate_stems(wav, device):
+    """(venv) Demucs htdemucs_6s → ({트랙: (2, N) float32 배열}, 샘플레이트, 정보). 파일로 쓰지 않는다 — 수치만 재고 버림.
+    정규화는 demucs.separate 와 같다 (곡 평균·표준편차로 나눈 뒤 되돌림)."""
+    import numpy as np
+    import soundfile as sf
+    import torch
+    from demucs.apply import apply_model
+    from demucs.pretrained import get_model
+    model = get_model(DEMUCS_MODEL)
+    model.eval()
+    data, sr = sf.read(str(wav), dtype="float32", always_2d=True)
+    if sr != model.samplerate:
+        import librosa
+        data = librosa.resample(data.T, orig_sr=sr, target_sr=model.samplerate).T
+        sr = model.samplerate
+    if data.shape[1] == 1:
+        data = np.repeat(data, 2, axis=1)
+    mix = torch.from_numpy(np.ascontiguousarray(data[:, :2].T))
+    ref = mix.mean(0)
+    mean, std = ref.mean(), ref.std() + 1e-8
+    with torch.inference_mode():
+        sources = apply_model(model, ((mix - mean) / std)[None], device=device, shifts=1, split=True, overlap=0.25,
+                              progress=False)[0]
+    sources = sources * std + mean
+    arrays = {name: src.cpu().numpy() for name, src in zip(model.sources, sources)}
+    info = dict(model=DEMUCS_MODEL, sources=list(model.sources), samplerate=sr)
+    del model, sources
+    if device != "cpu":
+        torch.cuda.empty_cache()
+    return arrays, sr, info
+
+
 def ast_probs(y16, device):
     """16kHz 모노 → AudioSet 태그 확률(10초 창, 최대 36개 창 평균) → ({이름: p}, 정보)."""
     import torch
@@ -789,6 +842,7 @@ def analyze(args):
     cap = torch.cuda.get_device_capability(0) if torch.cuda.is_available() else (0, 0)
     tdir = ref_dir / "transcription"
     sheet = dict(ok=False)
+    mel, form = None, []
     if not (tdir / "score.abc").is_file():
         if tdir.exists():
             shutil.rmtree(tdir)
@@ -802,9 +856,12 @@ def analyze(args):
         try:
             sys.path.insert(0, str(SKILL_DIR))
             from abc_tools import parse_abc
-            score = parse_abc((tdir / "score.abc").read_text(encoding="utf-8"))
+            score_text = (tdir / "score.abc").read_text(encoding="utf-8")
+            score = parse_abc(score_text)
             tonic, mode = abc_key_mode(score.voices["Vocal"].key)
             sheet = dict(ok=True, bpm=score.bpm, key=f"{tonic} {mode}", melody_notes=len(melody_line(score)))
+            mel = ma.melody_features(melody_line(score))  # 음표 자체는 공개 파일에 넣지 않는다 — 특징 숫자만
+            form = ma.form_sections(score_text)
         except Exception as e:  # noqa: BLE001
             sheet = dict(ok=False, error=f"{type(e).__name__}: {e}")
     else:
@@ -812,6 +869,28 @@ def analyze(args):
         sheet["error"] = json.loads(failure.read_text(encoding="utf-8")).get("error") if failure.is_file() else "score.abc 없음"
     log("ANALYZE", logging.INFO if sheet["ok"] else logging.WARNING, step="sheetsage2", **sheet,
         **({} if sheet["ok"] else {"hint": "멜로디 검사 못 함 → 이 곡들은 --push-unchecked 일 때만 올림 · 다시 받아 적기는 --reanalyze"}))
+
+    if mel:
+        log("ANALYZE", step="melody", **mel, form=",".join(form) or "-")
+
+    # 3b) 트랙 분리 → 트랙별 수치 (분리한 원곡 트랙은 메모리에서만 — 파일·결과 곡에 남기지 않음)
+    stems, stems_info, stems_error = {}, {}, None
+    try:
+        t2 = time.time()
+        arrays, stem_sr, stems_info = separate_stems(wav, device)
+        stems = ma.add_shares({name: ma.stem_features(arr, stem_sr) for name, arr in arrays.items()})
+        del arrays
+        for name, f in stems.items():
+            f.pop("energy", None)
+            f["words"] = ma.stem_words(f, name)
+            log("ANALYZE", step="stems", stem=name, share=f["share"], centroid_hz=f.get("centroid_hz", "-"),
+                width=f.get("width", "-"), crest_db=f.get("crest_db", "-"), tail=f.get("tail", "-"),
+                flatness=f.get("flatness", "-"), words=";".join(f"{k}:{v}" for k, v in f["words"].items()))
+        log("ANALYZE", step="stems", model=stems_info.get("model"), seconds=round(time.time() - t2, 1))
+    except Exception as e:  # noqa: BLE001
+        stems_error = f"{type(e).__name__}: {e}"
+        log("ANALYZE", logging.WARNING, step="stems", error=stems_error,
+            hint="트랙 분리 없이 진행 — Claude 에게 보낼 글에는 태그·멜로디 특징만")
 
     # 4) 프롬프트 — 장·단조는 SheetSage2 값만 넣는다 (librosa 크로마 추정은 합성 시험에서 A단조를 A장조로 읽음 → 기록만)
     if sheet["ok"]:
@@ -826,6 +905,8 @@ def analyze(args):
                   reference=dict(sha256=ref_sha, seconds=feats["seconds"]),
                   librosa=feats, tags={k: v for k, v in tags.items()}, tags_top15=top, ast=ast_info,
                   sheetsage2=dict(sheet),
+                  stems=stems, stems_info=stems_info, stems_error=stems_error,
+                  melody_features=mel, melody_words=ma.melody_words(mel), form=form,
                   prompt=dict(style=style, extra=args.style_extra, tempo_from=src_name, key_from=key_from),
                   note="원곡 파일·원곡 악보·파일 이름은 저장소에 올리지 않는다. 연구·교육용.")
     (name_dir / "analysis.json").write_text(json.dumps(public, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -1210,6 +1291,58 @@ def worker_cmd(args, gpu_seeds, fetch_only=False):
     return [str(c) for c in cmd]
 
 
+def ensure_analysis(name_dir, ref, args, gpu):
+    """참고 곡 분석이 없으면 (venv) _analyze 를 돌린다. 같은 이름에 다른 곡(sha256 다름)이면 멈춤 → analysis.json 내용."""
+    ref_sha = sha256_file(ref)
+    analysis_json = name_dir / "analysis.json"
+    if analysis_json.is_file() and not args.reanalyze:
+        old_sha = json.loads(analysis_json.read_text(encoding="utf-8")).get("reference", {}).get("sha256")
+        if old_sha != ref_sha:
+            die("INPUT", error=f"이름 {name_dir.name} 은 다른 참고 곡으로 이미 분석함",
+                hint="이름을 바꾸거나(--name) --reanalyze", old=str(old_sha)[:12], new=ref_sha[:12])
+        log("ANALYZE", status="skip", reason="같은 곡을 이미 분석함 (--reanalyze 로 다시)", path=analysis_json)
+    else:
+        if args.reanalyze and (name_dir / "reference").exists():
+            shutil.rmtree(name_dir / "reference")
+        cmd = [str(VENV_PY), str(Path(__file__).resolve()), "_analyze", "--ref", str(ref), "--name", name_dir.name,
+               "--out", str(name_dir.parent), "--style-extra", args.style_extra, "--log-level", args.log_level]
+        if run_streamed(cmd, worker_env(gpu), "analyze"):
+            die("ANALYZE", error="참고 곡 분석 실패", hint="위 analyze 줄의 오류 확인")
+    return json.loads(analysis_json.read_text(encoding="utf-8"))
+
+
+CLAUDE_BEGIN = "----- Claude 에게 보낼 글 (여기부터 복사 — 사진을 함께 첨부) -----"
+CLAUDE_END = "----- (여기까지) -----"
+
+
+def analyze_command(args):
+    """참고 곡 분석(트랙 분리 포함) → <이름>/claude_request.txt (멘트 포함) → 출력. 생성은 하지 않는다."""
+    if not NAME_RE.fullmatch(args.name):
+        die("INPUT", error=f"이름 {args.name!r}", hint="영문·숫자·_.- 만 (예: my-song-01)")
+    try:
+        ref = find_reference(args.ref)
+    except (FileNotFoundError, ValueError) as e:
+        die("INPUT", error=str(e), hint="--ref <곡 파일> 또는 --ref auto")
+    comment = ""
+    if args.comment_file:
+        try:
+            comment = Path(args.comment_file).read_text(encoding="utf-8")
+        except OSError as e:
+            die("INPUT", error=f"멘트 파일을 못 읽음: {e}", hint="--comment-file 경로 확인")
+    rows = setup(force=args.reinstall)
+    name_dir = Path(args.out) / args.name
+    analysis = ensure_analysis(name_dir, ref, args, rows[0]["index"])
+    text = ma.claude_request(analysis, comment, args.lyrics)
+    request = name_dir / "claude_request.txt"
+    request.write_text(text, encoding="utf-8")
+    log("CLAUDE", file=request, lyrics=args.lyrics, comment_chars=len(comment.strip()), chars=len(text),
+        stems=len(analysis.get("stems") or {}), melody=bool(analysis.get("melody_features")))
+    print(CLAUDE_BEGIN)
+    print(text, end="")
+    print(CLAUDE_END)
+    return 0
+
+
 def run(args):
     t0 = time.time()
     if not NAME_RE.fullmatch(args.name):
@@ -1247,21 +1380,7 @@ def run(args):
     # 참고 곡 → 분석 → 프롬프트
     style_from = "--style"
     if ref:
-        ref_sha = sha256_file(ref)
-        if (name_dir / "analysis.json").is_file() and not args.reanalyze:
-            old_sha = json.loads((name_dir / "analysis.json").read_text(encoding="utf-8")).get("reference", {}).get("sha256")
-            if old_sha != ref_sha:
-                die("INPUT", error=f"이름 {args.name} 은 다른 참고 곡으로 이미 분석함",
-                    hint="이름을 바꾸거나(--name) --reanalyze", old=str(old_sha)[:12], new=ref_sha[:12])
-            log("ANALYZE", status="skip", reason="같은 곡을 이미 분석함 (--reanalyze 로 다시)", path=name_dir / "analysis.json")
-        else:
-            if args.reanalyze and (name_dir / "reference").exists():
-                shutil.rmtree(name_dir / "reference")
-            cmd = [str(VENV_PY), str(Path(__file__).resolve()), "_analyze", "--ref", str(ref), "--name", args.name,
-                   "--out", args.out, "--style-extra", args.style_extra, "--log-level", args.log_level]
-            if run_streamed(cmd, worker_env(usable[0]), "analyze"):
-                die("ANALYZE", error="참고 곡 분석 실패", hint="위 analyze 줄의 오류 확인")
-        analysis = json.loads((name_dir / "analysis.json").read_text(encoding="utf-8"))
+        analysis = ensure_analysis(name_dir, ref, args, usable[0])
         if args.style.strip():
             style_from = "--style (참고 곡 분석은 멜로디 검사에만)"
         else:
@@ -1356,6 +1475,16 @@ def main(argv=None):
         q.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING"), default="INFO")
         if cmd_name == "push":
             add_push_args(q)
+    z = sub.add_parser("analyze", help="참고 곡 분석(트랙 분리 포함) → Claude 에게 보낼 글 (생성은 안 함)")
+    z.add_argument("--ref", required=True, help="참고 곡 파일, 또는 auto")
+    z.add_argument("--name", default=None, help="결과 폴더 이름 (기본: ref-날짜시각)")
+    z.add_argument("--out", default=str(OUT))
+    z.add_argument("--comment-file", help="이 곡을 듣고 느낀 멘트 (글 파일)")
+    z.add_argument("--lyrics", action="store_true", help="가사 넣기 — Claude 에게 가사도 부탁")
+    z.add_argument("--style-extra", default="")
+    z.add_argument("--reanalyze", action="store_true")
+    z.add_argument("--reinstall", action="store_true")
+    z.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING"), default="INFO")
     a = sub.add_parser("_analyze", help=argparse.SUPPRESS)
     a.add_argument("--ref", required=True)
     a.add_argument("--name", required=True)
@@ -1371,6 +1500,10 @@ def main(argv=None):
         args.name = args.name or f"{prefix}-{datetime.now():%Y%m%d-%H%M%S}"
         setup_logging(args.log_level, Path(args.out) / "music.log")
         return run(args)
+    if args.command == "analyze":
+        args.name = args.name or f"ref-{datetime.now():%Y%m%d-%H%M%S}"
+        setup_logging(args.log_level, Path(args.out) / "music.log")
+        return analyze_command(args)
     if args.command in ("similarity", "push"):
         setup_logging(args.log_level, Path(args.out) / "music.log")
         name_dir = Path(args.out) / args.name

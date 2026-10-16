@@ -7,6 +7,7 @@ r"""
 
 - GPU·네트워크·모델·GitHub 없이 돈다. 올리기 시험은 임시 폴더의 로컬 git 원격(bare)만 쓴다.
 """
+import io
 import json
 import os
 import random
@@ -533,6 +534,45 @@ class TestEnv(unittest.TestCase):
                 with self.assertRaises(SystemExit):  # 여기서는 가짜 모델 받기가 실패해서 멈춤
                     km.main(argv)
                 self.assertEqual([c.args[2] for c in streamed.call_args_list], ["fetch"])  # 분석은 건너뜀
+
+    def test_analyze_command_writes_claude_request(self):
+        """v1.4: analyze = 분석(가짜) → claude_request.txt (멘트·가사 여부 반영) → 출력. 생성은 하지 않는다."""
+        gpus = [dict(index=1, name="T4", mem_mib=15360, driver="560", cap=(7, 5))]
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            ref = d / "fav.mp3"
+            ref.write_bytes(b"song")
+            comment = d / "c.txt"
+            comment.write_text("비 오는 밤 버스 창가", encoding="utf-8")
+            name_dir = d / "out" / "my-01"
+
+            def fake_streamed(cmd, env, prefix):
+                self.assertEqual((prefix, env["CUDA_VISIBLE_DEVICES"]), ("analyze", "1"))
+                name_dir.mkdir(parents=True)
+                (name_dir / "analysis.json").write_text(json.dumps({
+                    "reference": {"sha256": km.sha256_file(ref)}, "librosa": {"seconds": 200, "tempo_bpm": 120},
+                    "stems": {"vocals": {"share": 0.4, "centroid_hz": 2000.0, "width": 0.05, "crest_db": 12, "tail": 0.2,
+                                         "words": {"비중": "중심"}}}, "prompt": {"style": "pop"}}), encoding="utf-8")
+                return 0
+
+            out = io.StringIO()
+            with mock.patch.object(km, "setup", return_value=gpus), mock.patch.object(km, "setup_logging"), \
+                    mock.patch.object(km, "run_streamed", side_effect=fake_streamed) as streamed, \
+                    mock.patch.object(km, "worker", side_effect=AssertionError("생성하면 안 됨")), \
+                    mock.patch("sys.stdout", out):
+                rc = km.main(["analyze", "--ref", str(ref), "--name", "my-01", "--out", str(d / "out"),
+                              "--comment-file", str(comment), "--lyrics"])
+                self.assertEqual(rc, 0)
+                km.main(["analyze", "--ref", str(ref), "--name", "my-01", "--out", str(d / "out")])  # 두 번째는 분석을 건너뜀
+            self.assertEqual(streamed.call_count, 1)
+            text = (name_dir / "claude_request.txt").read_text(encoding="utf-8")
+            printed = out.getvalue()
+            self.assertIn(km.CLAUDE_BEGIN, printed)
+            self.assertIn("(여기에 멘트를 적어 주세요)", text)  # 두 번째 실행(멘트·가사 없음)으로 다시 씀
+            self.assertIn("비 오는 밤 버스 창가", printed)  # 첫 번째 실행의 글
+            self.assertIn("새 가사", printed)
+            self.assertIn("보컬: 비중 40%(중심)", text)
+            self.assertNotIn("fav.mp3", text)
 
     def test_cli_parses_ref_run(self):
         with mock.patch.object(km, "run", return_value=0) as run, mock.patch.object(km, "setup_logging"):
