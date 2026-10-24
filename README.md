@@ -4,13 +4,20 @@
 좋아하는 곡 하나 + 그 곡을 듣고 느낀 **멘트** + 떠오르는 **사진**으로 새 곡을 만든다: 곡을 **트랙별로 나눠 분석**하고(멜로디 특징·소리 질감), 그 숫자와 멘트·사진을 **Claude 대화**에서 프롬프트·가사로 바꾼 뒤, YuE2 가 **멜로디가 다른 새 곡**을 여러 개 만든다. 원곡과 멜로디를 비교해 **통과한 곡만 이 저장소 `results/`** 에 올린다.
 ※ 연구·교육용. Kaggle 실제 GPU 실행은 아직 검증 전 — 첫 실행 로그의 `[PATCH]`·`[ANALYZE]`·`[GEN]`·`[SIMILARITY]`·`[PUSH]` 줄로 확인한다.
 
+**반주 만들기**: 멜로디 **한 마디**를 찍으면 AI(Anticipatory Music Transformer)가 드럼·베이스·일렉기타·피아노 등의 반주를 만들어 **악기마다 따로 된 소리**(한 마디·반복)와 MIDI 로 준다 → 아래 [반주 만들기](#반주-만들기--멜로디-한-마디--악기마다-따로-된-소리).
+
 | 파일 | 하는 일 |
 |---|---|
 | `tools/kaggle_music_panel.py` (v1.1) | 노트북 버튼 세 단계: **① 분석 + Claude 에게 보낼 글** → **② Claude 답 읽기** → **③ 곡 만들기** |
-| `tools/kaggle_music_yue2.py` (v1.4) | 설치(처음 한 번) · `analyze`(트랙 분리·분석 → Claude 에게 보낼 글) · `run`(생성 → 멜로디 검사 → 저장소에) — 버튼이 이것을 부름 |
+| `tools/kaggle_music_yue2.py` (v1.5) | 설치(처음 한 번) · `analyze`(트랙 분리·분석 → Claude 에게 보낼 글) · `run`(생성 → 멜로디 검사 → 저장소에) — 버튼이 이것을 부름 |
 | `tools/music_analysis.py` (v1.0) | 트랙별 수치·멜로디 특징·곡 구성·Claude 에게 보낼 글·Claude 답 읽기 (순수 계산) |
-| `tools/tests/` | GPU·네트워크 없이 도는 시험 66개: `python3 -m unittest tools.tests.test_kaggle_music_yue2 tools.tests.test_kaggle_music_panel tools.tests.test_music_analysis -v` |
+| `web/melody_pad.html` (v1.0) | **멜로디 찍기** 웹 페이지 원본 (claude.ai 페이지로 올림) — 한 마디 피아노 롤·건반·허밍 파일 → 멜로디 코드 |
+| `tools/kaggle_accomp_panel.py` (v1.0) | 노트북 버튼: 멜로디 코드 → 악기 고르기 → **[반주 만들기]** → 악기별 플레이어 |
+| `tools/kaggle_accomp.py` (v1.0) | 반주 설치·AI 생성(악기마다 차례로)·악기별 WAV·MIDI·저장소에 — 버튼이 이것을 부름 |
+| `tools/accomp.py` (v1.0) | 멜로디 코드·AMT 토큰·악기 음역 거르기·16분 격자·MIDI 쓰기·사운드폰트 렌더 (순수 계산) |
+| `tools/tests/` | GPU·네트워크 없이 도는 시험 91개: `python3 -m unittest tools.tests.test_kaggle_music_yue2 tools.tests.test_kaggle_music_panel tools.tests.test_music_analysis tools.tests.test_accomp tools.tests.test_kaggle_accomp tools.tests.test_kaggle_accomp_panel -v` (numpy·mido·tinysoundfont 가 있으면 소리·MIDI 시험도, 사운드폰트 실제 렌더는 `ACCOMP_TEST_SF2=<sf2>`) |
 | `results/<이름>/` | 올라간 곡 — `seed-N/audio.mp3`(320k)·`score.abc`(AI 악보)·`kaggle_run.json`·`similarity.json`, `analysis.json`·`prompt.txt`·`README.md` |
+| `results/accomp/<이름>/` | 올라간 반주 — 악기마다 `<악기>_1bar.wav`·`<악기>.wav`·`<악기>.mid`, `mix.wav`·`all.mid`·`run.json`·`README.md` |
 
 ## 처음 한 번 준비
 
@@ -55,6 +62,87 @@ import kaggle_music_panel; importlib.reload(kaggle_music_panel).panel()
 
 - 로그는 아래 칸과 `/kaggle/working/music/panel.log` 에 함께. 실행 중에는 버튼이 잠긴다. 멈추려면 Kaggle 의 셀 멈춤(■) — GPU 작업 프로세스까지 함께 멈춘다.
 - 같은 이름으로 다시 하면 같은 곡은 분석을 건너뛴다. **다른 곡인데 이름이 같으면 멈춘다** → 이름을 바꾼다.
+
+## 반주 만들기 — 멜로디 한 마디 → 악기마다 따로 된 소리
+
+**① 멜로디 찍기** — 웹 페이지 <https://claude.ai/artifact/HinPmeUvyqN7KhBgrGYZ6D> (claude.ai 에 로그인한 본인 계정으로 열림, 원본 `web/melody_pad.html`)
+- **칸 클릭**: 빈 칸 = 음 찍기(옆으로 끌면 그만큼 길게) · 음 클릭 = 지우기 · 음을 잡고 옆으로 끌기 = 길이 바꾸기. 위의 '음 길이'(16분·8분·4분…)가 클릭 한 번의 길이
+- **건반으로 차례로**: 아래 건반(도레미…)을 누르면 커서 자리부터 하나씩 채워진다. 컴퓨터 자판도 됨 (`Z S X D C V …` 아래 옥타브, `Q 2 W 3 E …` 위 옥타브, `-` 쉼표, Space 재생)
+- **허밍으로**: 휴대폰 녹음 앱으로 '라라라'를 또박또박 불러 녹음한 파일(m4a·mp3·wav)을 올리면 음 높이를 찾아 칸에 채운다 (녹음 전체를 한 마디로 맞추기 또는 템포 그대로, 음계 음으로 맞추기). 페이지가 마이크를 직접 쓸 수 없어 파일로 받는다. 찾은 음 높이 그래프가 함께 나오니 재생해 보고 칸에서 고친다
+- **음계 표시**: 장조·단조를 고르면 음계 밖 줄이 흐려지고 으뜸음 줄에 점 — 어떤 음을 찍어야 어울리는지 보인다. 예시 멜로디 3개, 되돌리기, 반음·옥타브 옮기기
+- **[코드 복사]** → `M1 bpm=110 steps=16 notes=76@0+2,74@2+1,…` (음 번호@시작 칸+길이 칸, 16칸 = 4/4 한 마디. 음 이름 `E5@0+2` 도 됨)
+
+**② Kaggle 셀** (준비는 위 '처음 한 번 준비'와 같음 — GPU T4 x2·Internet On·GITHUB_TOKEN)
+
+```python
+import os, sys, importlib
+from kaggle_secrets import UserSecretsClient
+os.environ["GITHUB_TOKEN"] = UserSecretsClient().get_secret("GITHUB_TOKEN")   # 결과 올리기용 (값은 출력하지 않음)
+!test -d /kaggle/working/music-ytb || git clone -q --depth 1 https://github.com/yeomin1024/music-ytb.git /kaggle/working/music-ytb
+!cd /kaggle/working/music-ytb && git config core.fileMode false && git fetch -q origin main && git reset -q --hard origin/main
+sys.path.insert(0, "/kaggle/working/music-ytb/tools")
+import kaggle_accomp_panel; importlib.reload(kaggle_accomp_panel).panel()
+```
+
+**③ 패널**
+- **멜로디 코드** 칸에 붙여 넣기 → 아래 요약 줄(음 몇 개·BPM·음역)로 확인. 코드 대신 **MIDI 올리기**도 됨 (첫 음이 있는 마디)
+- **멜로디 악기**(피아노·플루트·바이올린·신스 리드·색소폰·트럼펫·일렉기타…) · **반주 악기** 체크 (기본 드럼·베이스·일렉기타(깨끗한)·피아노)
+- **반복 마디**(기본 4 — 반주가 자리 잡게 한 마디를 반복해서 만든다) · **시드**(바꾸면 다른 반주) · AI 크기(기본 medium) · 이름 · 저장소에 올리기
+- **[반주 만들기]** → 끝나면 악기마다 **한 마디**·**반복** 플레이어와 합친 소리
+
+결과 (`/kaggle/working/accomp/<이름>/`, 올리기를 켜면 `results/accomp/<이름>/`):
+
+| 파일 | 내용 |
+|---|---|
+| `<악기>_1bar.wav` | 그 악기만, 한 마디 (마지막 마디 — 이어 붙이면 반복된다) |
+| `<악기>.wav` | 그 악기만, 반복 마디 전체 |
+| `<악기>.mid` | 그 악기 MIDI — 작곡 프로그램(DAW)에 불러와 음색을 바꾸면 소리가 좋아진다 |
+| `melody*` | 내 멜로디 (고른 멜로디 악기 소리) |
+| `mix.wav`·`mix_1bar.wav`·`all.mid` | 모두 합친 소리·모든 악기 MIDI |
+| `run.json` | 멜로디 코드·시드·악기별 음 수·음역·모델 리비전·설치 버전 |
+
+악기 (`kaggle_accomp.py instruments`):
+
+| 반주 | 멜로디로도 |
+|---|---|
+| 드럼 `drums` · 베이스 `bass` · 신스 패드 `synth_pad` | — |
+| 피아노 `piano` · 일렉트릭 피아노 `epiano` · 일렉기타 깨끗한 `guitar_clean` / 드라이브 `guitar_drive` / 디스토션 `guitar_dist` · 통기타 `acoustic_guitar` · 스트링 `strings` · 브라스 `brass` | 됨 |
+| — | 신스 리드 `synth_lead` · 플루트 `flute` · 바이올린 `violin` · 알토 색소폰 `sax` · 트럼펫 `trumpet` · 코러스 '아' `voice` |
+
+명령으로 (버튼 대신):
+
+```
+!python /kaggle/working/music-ytb/tools/kaggle_accomp.py run --melody "M1 bpm=110 steps=16 notes=76@0+2,74@2+1,72@3+1" \
+    --melody-instrument piano --instruments drums,bass,guitar_clean,piano --loops 4 --seed 1 --push
+```
+
+어떻게 만드나 (로그 단계):
+1. `[SETUP]`·`[CHECK]` — 세션마다 처음 한 번: anticipation(커밋 고정)·tinysoundfont·mido 설치, 사운드폰트 내려받기(sha256 확인), AI 어휘 상수가 도구와 같은지 `vocab=ok`
+2. `[MELODY]` — 멜로디 코드 → 한 마디를 반복 마디 수만큼 이어 붙임
+3. `[LOAD]` — AI 모델 `stanford-crfm/music-medium-800k` (리비전은 `run.json` 에)
+4. `[GEN] inst=… notes=…` — **악기마다 한 번씩 차례로** (드럼 → 베이스 → 피아노·기타 → 스트링·패드). 조건 = 내 멜로디 + 앞에서 만든 악기들, 다음 음은 **그 악기·그 음역만** 나오게 거른다 → 한 악기만 든 소리. 음이 너무 적으면 다른 시드로 다시 (최대 3번, `warning=… 음이 적음` 이면 시드를 바꿔 다시)
+5. `[SAVE]` — 16분음표 격자에 맞춘 뒤 악기별 WAV·MIDI. 트랙끼리 크기 균형은 그대로 두고 가장 큰 트랙 최고점을 -1dBFS 로
+6. `[PUSH]` — `results/accomp/<이름>/` 에 (내가 찍은 멜로디라 원곡 문제 없음)
+
+AI 모델과 소리:
+- **Anticipatory Music Transformer** (Stanford CRFM, 코드·가중치 Apache-2.0, Lakh MIDI 로 학습) — 멜로디를 '조건'으로 주면 그에 맞는 다른 악기 연주를 만드는 모델.
+- 처음 고른 **GETMusic**(Microsoft, 트랙별 생성)은 쓸 수 없다: 가중치 내려받기 링크가 지워졌고(이슈 #203·#213·#215, 답 없음) 저장소도 2026-10-01 보관 처리됐다.
+- 소리: tinysoundfont 0.3.7 + 사운드폰트 **GeneralUser GS v2.0.3** (개인·상업 음악 제작에 제한 없이 사용 가능 — 그 라이선스 문서)
+
+한계:
+- **Kaggle 실제 실행은 아직 검증 전** — AI 생성은 이 저장소 시험에서 가짜 모델로만 확인했다 (토큰 모양·악기 거르기·순서·재시도·내보내기·올리기). 첫 실행에서 `[CHECK] vocab=ok`, `[GEN] inst=drums notes=…` 줄을 확인한다.
+- 사운드폰트 소리는 실제 연주보다 단순하다 (특히 일렉기타) → MIDI 를 DAW 에서 다른 음색으로.
+- AI 가 셈여림(세기)을 만들지 않아 악기마다 같은 세기. 한 마디만으로는 어울리는 화음이 여럿 → 시드를 바꿔 여러 번 들어 보기.
+- 한 번에 100초까지 (반복 마디 × 마디 길이 95초 이하).
+
+| 로그 | 할 일 |
+|---|---|
+| `[INPUT] … 멜로디` · `[PANEL] 멜로디 코드: …` | 멜로디 찍기 페이지의 [코드 복사] 그대로 붙여 넣기 (겹치는 음·마디 밖 음은 안 됨) |
+| `[CHECK] … AMT 어휘가 다름` | anticipation 버전 문제 — 이 저장소 이슈로 알려 주기 (도구가 커밋을 고정하므로 보통 안 남) |
+| `[LOAD] … error=` | Settings → Internet: On 확인. GPU 메모리 부족이면 AI 크기 small |
+| `[GEN] … error=… out of memory` | AI 크기 small 또는 반복 마디를 줄여 다시 |
+| `[GEN] … 음이 적음` | 시드를 바꾸거나 반복 마디를 늘려 다시 |
+| `[PUSH] … 올리기 실패` | 결과는 `/kaggle/working/accomp/<이름>/` 에 있음 |
 
 ## Claude 에게 보낼 글 (① 이 만들어 줌)
 
@@ -198,6 +286,7 @@ VRAM 20GiB 미만이면 공식 옵션 `offload_ar` 를 켠다 (메모리만 아�
 - 설치: uv 0.12.19, 파이썬 3.12, `yue2-infer` 0.1.6 휠 sha256 `129a0153…`, torch 2.10.0 (CUDA 12.8), librosa 0.11.0, demucs 4.1.0(트랙 분리 `htdemucs_6s`), SheetSage2 의존 mir_eval 0.8.2·pretty_midi 0.2.10·mido 1.3.3·scipy 1.15.3 (YuE2-Turbo 와 같은 고정). 실제 설치 목록은 `/tmp/yue2/freeze.txt`
 - 모델: `m-a-p/YuE2-3B@14fc6c6f…`, `m-a-p/YuE2-Vae@9a94e1d0…`, SheetSage2·MERT2 는 공식 `cover-release.json` 리비전, 태그 `MIT/ast-finetuned-audioset-10-10-0.4593`(리비전은 `analysis.json` 에 기록)
 - 공식 스킬 코드 7개(연주곡 변환·받아 적기·리비전 표): 커밋 `1647252d…`·파일마다 sha256
+- 반주: anticipation 커밋 `af373979…`(2024-03-18), tinysoundfont 0.3.7(의존성 없이), mido 1.3.3, 사운드폰트 GeneralUser GS v2.0.3 커밋 `684543d5…`·sha256 `9575028c…`, 모델 `stanford-crfm/music-{small,medium,large}-800k`(리비전은 `run.json` 에)
 
 ## 라이선스
 

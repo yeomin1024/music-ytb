@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# VERSION: v1.4 — 2026-10-16 — 사용자 지시 "음악 하나랑 … 멘트와 … 사진 … 트랙을 분리한 후 각각 멜로디, 이펙트 등을 분석하고 변형해서
+# VERSION: v1.5 — 2026-10-24 — 사용자 지시 "멜로디 한 마디 … 베이스, 드럼, 일렉기타, 피아노 … 각각 한 악기의 음원만 … B 방식(AI)으로 해봐":
+#          새 도구 tools/kaggle_accomp.py 가 저장소 올리기를 같이 쓰도록 commit_push 를 push_results 에서 떼어 냄 (동작 같음),
+#          도구 버전만 바뀌었을 때 설치를 다시 하지 않게 고침
+# (v1.4) — 2026-10-16 — 사용자 지시 "음악 하나랑 … 멘트와 … 사진 … 트랙을 분리한 후 각각 멜로디, 이펙트 등을 분석하고 변형해서
 #          내 멘트와 이미지 종합해서 음악 하나 … 가사 여부는 내가 체크" + "멘트·사진은 내가 클로드한테 물어보고 결과 넣을테니까 … 선택 2
 #          (가사 초안 → 고친 뒤 생성)는 그렇게 해": 분석에 Demucs 트랙 분리(6트랙)·트랙별 수치·멜로디 특징·곡 구성을 더하고,
 #          analyze 명령이 'Claude 에게 보낼 글'을 만든다 (멘트 포함, 사진은 사용자가 Claude 대화에 첨부)
@@ -98,6 +101,10 @@ T4(Turing, 연산 능력 7.5)에서 공식 코드가 그대로는 멈추거나 �
 #          ensure_analysis(run 과 같이 씀), analyze 명령(--comment-file·--lyrics → claude_request.txt). 순수 계산은 새 파일
 #          tools/music_analysis.py v1.0. 생성·검사·올리기·T4 패치는 그대로. 설치 목록이 바뀌어 venv 를 한 번 다시 만든다.
 #          영향: setup(설치 목록), _analyze, run(분석 부분 → ensure_analysis), main
+#   v1.5 — 2026-10-24 — push_results 의 커밋·pull --rebase·push 재시도를 commit_push(dest, message, env, retry_hint)
+#          로 떼어 냄 — tools/kaggle_accomp.py(새, AI 반주)가 같이 씀. push_results 의 동작·로그·커밋 메시지는 그대로
+#          (시험: 로컬 bare 원격으로 올리기 시험이 그대로 통과). setup 의 '이미 설치됨' 비교에서 도구 버전을 뺌 — 설치 내용이
+#          같으면 도구만 바뀌어도 venv 를 다시 만들지 않는다 (기록에는 남김). 영향: push_results, 새 commit_push, setup
 import argparse
 import functools
 import hashlib
@@ -119,7 +126,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import music_analysis as ma  # noqa: E402 — 표준 라이브러리만 (numpy 는 함수 안에서)
 
-TOOL_VERSION = "v1.4"
+TOOL_VERSION = "v1.5"
 ROOT = Path(__file__).resolve().parent.parent
 
 # ------------------------------------------------------------------ 고정값 (바꾸면 VERSION 을 올리고 CHANGELOG 에 적는다)
@@ -637,7 +644,8 @@ def setup(force=False):
     if disk_free_gb(WORK) < MIN_FREE_GB:
         log("ENV", logging.WARNING, warning="디스크 여유가 적음", need_gb=MIN_FREE_GB,
             hint="설치·모델 받기에서 멈추면 YUE2_WORK 환경 변수로 더 큰 디스크를 지정")
-    want = {"tool": TOOL_VERSION, "wheel_sha256": WHEEL_SHA256, "skill_commit": SKILL_COMMIT, "python": PYTHON_VERSION,
+    # 설치에 들어가는 것만 비교 (v1.5 — 도구 버전만 바뀌어도 venv 를 다시 만들던 것을 고침)
+    want = {"wheel_sha256": WHEEL_SHA256, "skill_commit": SKILL_COMMIT, "python": PYTHON_VERSION,
             "extra": list(EXTRA_PACKAGES), "skill_files": sorted(SKILL_FILES)}
     if READY.is_file() and VENV_PY.is_file() and not force:
         try:
@@ -664,7 +672,8 @@ def setup(force=False):
         download(SKILL_URL.format(commit=SKILL_COMMIT, path=path), SKILL_ROOT / path, digest, "SETUP")
     run_cmd([VENV_PY, Path(__file__).resolve(), "check"], "CHECK",
             "이 GPU 에서 공식 BF16 경로가 안 됨 → 위 [CHECK] 줄 확인 (대안: yue2.cpp GGUF 포팅)", env=worker_env())
-    READY.write_text(json.dumps(want | {"created": datetime.now().isoformat(timespec="seconds")}, ensure_ascii=False),
+    READY.write_text(json.dumps(want | {"tool": TOOL_VERSION, "created": datetime.now().isoformat(timespec="seconds")},
+                                ensure_ascii=False),
                      encoding="utf-8")
     log("SETUP", status="done", minutes=round((time.time() - t0) / 60, 1), venv=VENV, freeze=WORK / "freeze.txt")
     return rows
@@ -1236,27 +1245,37 @@ def push_results(name_dir, results, allow, include_flac=False):
         analysis = json.loads((name_dir / "analysis.json").read_text(encoding="utf-8"))
     dest = Path(RESULTS_DIR) / name_dir.name
     (ROOT / dest / "README.md").write_text(results_readme(name_dir.name, results, allow, analysis), encoding="utf-8")
+    message = (f"음악: {name_dir.name} — {len(songs)}곡 올림 (kaggle_music_yue2 {TOOL_VERSION})"
+               + (f", 안 올림 {len(skipped)}곡" if skipped else ""))
+    return commit_push(dest, message, env, retry_hint=f"결과는 {name_dir} 에 있음 → push --name {name_dir.name} 로 다시",
+                       songs=len(songs))
+
+
+def commit_push(dest, message, env=None, retry_hint="같은 명령으로 다시", **log_kv):
+    """저장소 사본(ROOT)의 dest 폴더를 커밋 → pull --rebase → push (PUSH_TRIES 번, 2·4·8·16초 쉼) → 0 성공 · 1 실패.
+    push_results·kaggle_accomp.py 가 같이 쓴다 (v1.5 에서 push_results 에서 떼어 냄 — 동작 같음)."""
+    if env is None:
+        env, _ = git_env()
     try:
         git("add", "--", str(dest))
         if git("diff", "--cached", "--quiet", check=False).returncode == 0:
             log("PUSH", status="바뀐 것 없음")
             return 0
-        git("commit", "-q", "-m", f"음악: {name_dir.name} — {len(songs)}곡 올림 (kaggle_music_yue2 {TOOL_VERSION})"
-            + (f", 안 올림 {len(skipped)}곡" if skipped else ""))
+        git("commit", "-q", "-m", message)
     except RuntimeError as e:
-        log("PUSH", logging.ERROR, error=str(e), hint="push --name 으로 다시")
+        log("PUSH", logging.ERROR, error=str(e), hint=retry_hint)
         return 1
     for attempt in range(1, PUSH_TRIES + 1):
         pull = git("pull", "-q", "--rebase", "origin", "main", env=env, check=False)
         push = git("push", "-q", "origin", "HEAD:main", env=env, check=False)
         if pull.returncode == 0 and push.returncode == 0:
             head = git("rev-parse", "--short", "HEAD").stdout.strip()
-            log("PUSH", status="ok", commit=head, path=dest, songs=len(songs))
+            log("PUSH", status="ok", commit=head, path=dest, **log_kv)
             return 0
         err = (push.stderr or pull.stderr).strip().splitlines()
         log("PUSH", logging.WARNING, attempt=attempt, error=(err[-1] if err else "?")[:200])
         time.sleep(2 ** attempt)
-    log("PUSH", logging.ERROR, error="올리기 실패", hint=f"결과는 {name_dir} 에 있음 → push --name {name_dir.name} 로 다시")
+    log("PUSH", logging.ERROR, error="올리기 실패", hint=retry_hint)
     return 1
 
 
