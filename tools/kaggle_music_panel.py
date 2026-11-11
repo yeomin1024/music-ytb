@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# VERSION: v1.1 — 2026-10-16 — 사용자 지시 "음악 하나랑 그 음악을 듣고 느낀 멘트와 떠오르는 사진 … 트랙을 분리한 후 … 내 멘트와 이미지
+# VERSION: v1.2 — 2026-11-11 — 사용자 지시 "2번으로 소리까지 AI가 만드는 셀" + "스트링 소리도 추가 … 한 악기씩만": ai_samples() —
+#          YuE2 음색 견본을 만들어 묶음별로 '한 악기' 판정·목표 트랙만 걸러 낸 소리·AI 원래 소리 플레이어
+# (v1.1) — 2026-10-16 — 사용자 지시 "음악 하나랑 그 음악을 듣고 느낀 멘트와 떠오르는 사진 … 트랙을 분리한 후 … 내 멘트와 이미지
 #          종합해서 음악 하나 … 가사 여부는 내가 체크" + "멘트·사진은 내가 클로드한테 물어보고 결과 넣을테니까 … 선택 2(가사 초안을
 #          보고 고친 뒤 생성)는 그렇게 해": 세 단계 — ① 곡·멘트·가사 여부 → 분석 + Claude 에게 보낼 글 ② Claude 답 붙여 넣기 → 프롬프트·
 #          가사 초안 ③ 고친 뒤 곡 만들기 (v1.0: [곡 올리기] + [비슷한 곡 만들기] 한 번에)
@@ -22,6 +24,10 @@ Kaggle 노트북 셀(README.md '노트북 셀')에서 버튼으로: 곡 올리�
   올린 원곡·멘트 파일은 /tmp/yue2/upload/ 에만 (Kaggle 출력·저장소에 남기지 않음). 실행 중에는 버튼이 잠긴다.
   멈추려면 Kaggle 의 셀 멈춤(■) — 하위 프로세스까지 함께 멈춘다. 로그는 아래 칸과 /kaggle/working/music/panel.log 에 함께.
 
+AI 음색 견본 (악기·톤마다 몇 초, 한 악기만 — kaggle_music_yue2.py samples):
+  importlib.reload(kaggle_music_panel).ai_samples()                      # 전부 19개 (오래 걸림 — 견본 하나에 생성 1~3번)
+  importlib.reload(kaggle_music_panel).ai_samples("strings,electric")    # 묶음만: acoustic·electric·piano·strings·drums·bass·synth
+
 위젯이 없는 곳(터미널)에서는 버튼 대신 kaggle_music_yue2.py analyze / run 명령 (그 파일 머리말).
 ※ 연구·교육용 도구. 멜로디 검사는 경험칙이며 법적 판단이 아니다.
 """
@@ -31,6 +37,8 @@ Kaggle 노트북 셀(README.md '노트북 셀')에서 버튼으로: 곡 올리�
 #   v1.1 — 2026-10-16 — 세 단계 패널 (사용자 지시). 새것: 멘트 칸·가사 넣기 체크·Claude 에게 보낼 글 칸·Claude 답 칸·STYLE/SECTIONS/가사 칸,
 #          check_upload·check_make·build_analyze_command·build_run_command·write_text. 빠진 것: check_inputs·build_command
 #          (한 번에 만들기 — ①→③ 으로 같은 일). 멜로디 검사·올리기·멈춤은 그대로. 영향: panel 전체, 시험
+#   v1.2 — 2026-11-11 — ai_samples()·build_ai_samples_command·ai_sample_groups (사용자 지시). panel() 은 그대로.
+import html
 import json
 import os
 import re
@@ -47,8 +55,9 @@ ROOT = TOOLS.parent
 sys.path.insert(0, str(TOOLS))
 import kaggle_music_yue2 as km  # noqa: E402 — 표준 라이브러리만 불러오는 모듈 (GPU·torch 없음)
 import music_analysis as ma  # noqa: E402
+import ai_samples as ais  # noqa: E402
 
-PANEL_VERSION = "v1.1"
+PANEL_VERSION = "v1.2"
 UPLOAD_DIR = km.WORK / "upload"  # /tmp — Kaggle 출력으로 저장되지 않는다
 LOG_FILE = km.OUT / "panel.log"
 DEFAULT_COUNT = km.REF_COUNT
@@ -199,6 +208,60 @@ def results_rows(name_dir):
         mp3 = d / "audio.mp3"
         rows.append((d.name, seconds, verdict, mp3 if mp3.is_file() else None))
     return rows
+
+
+def build_ai_samples_command(only="", keys="", seconds=None, tries=None, out=None, python=sys.executable):
+    cmd = [python, str(TOOLS / "kaggle_music_yue2.py"), "samples", "--out", str(out or km.OUT / "ai_samples")]
+    for flag, value in (("--only", only), ("--keys", keys)):
+        if value:
+            cmd += [flag, ",".join(v.strip() for v in str(value).split(",") if v.strip())]
+    if seconds:
+        cmd += ["--seconds", str(seconds)]
+    if tries:
+        cmd += ["--tries", str(tries)]
+    return cmd
+
+
+def ai_sample_groups(index_file):
+    """index.json → [(묶음 이름, [기록])] (표 순서)."""
+    groups = {}
+    for rec in json.loads(Path(index_file).read_text(encoding="utf-8"))["samples"]:
+        groups.setdefault(rec["group_ko"], []).append(rec)
+    return list(groups.items())
+
+
+def ai_samples(only="", keys="", seconds=None, tries=None):
+    """Kaggle·Jupyter: AI 음색 견본 만들기 → 묶음별로 판정·'한 악기만' 플레이어·AI 원래 소리 플레이어."""
+    try:
+        from IPython.display import HTML, Audio, display
+    except ImportError:
+        print("[PANEL] IPython 없음 → kaggle_music_yue2.py samples (그 파일 머리말)")
+        return 1
+    out_root = km.OUT / "ai_samples"
+    t0 = time.time()
+    rc = run_command(build_ai_samples_command(only, keys, seconds, tries, out_root), write=print)
+    latest = out_root / "latest.txt"
+    run_dir = Path(latest.read_text(encoding="utf-8").strip()) if latest.is_file() and latest.stat().st_mtime >= t0 else None
+    if not run_dir or not (run_dir / "index.json").is_file():
+        print("[PANEL] 견본 없음 — 위 [ERROR]·level=error 줄 확인")
+        return rc or 1
+    display(HTML(f"<p>AI(YuE2)가 만든 소리. 먼저 혼자 연주하도록 프롬프트를 주고, Demucs 로 나눠 목표 악기 비중을 잰 뒤 "
+                 f"{ais.SOLO_MIN:.0%} 미만이면 다른 시드로 다시 만들었다. <b>한 악기만</b> = 목표 트랙만 걸러 낸 소리, "
+                 f"<b>AI 원래 소리</b> = 걸러 내기 전. 스트링·신스는 Demucs 에서 같은 '그 밖' 트랙이다.</p>"))
+    for group_ko, recs in ai_sample_groups(run_dir / "index.json"):
+        display(HTML(f"<h3>{html.escape(group_ko)}</h3>"))
+        for rec in recs:
+            if not rec.get("file"):
+                display(HTML(f"<b>{html.escape(rec['name'])}</b> — 만들지 못함 (위 [SAMPLES] 오류 줄)"))
+                continue
+            display(HTML(f"<b>{html.escape(rec['name'])}</b> <small>· 목표 트랙 {rec['share']:.0%} · "
+                         f"{html.escape(rec['verdict_ko'])} · 그 밖: {html.escape(rec.get('others', '-'))} · 시드 {rec['seed']}</small>"))
+            display(HTML("<small>한 악기만</small>"))
+            display(Audio(filename=str(run_dir / rec["file"])))
+            display(HTML("<small>AI 원래 소리</small>"))
+            display(Audio(filename=str(run_dir / rec["raw_file"])))
+    print(f"[PANEL] 견본 폴더 {run_dir}/clips/ · 기록 index.json" + ("" if rc == 0 else " (일부 실패 — 위 오류 줄)"))
+    return rc
 
 
 def panel():

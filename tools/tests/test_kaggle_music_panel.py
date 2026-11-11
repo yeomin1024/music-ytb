@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# VERSION: v1.1 — 2026-10-16 — kaggle_music_panel.py v1.1 시험: ① 분석 → ② Claude 답 읽기 → ③ 곡 만들기 (가짜 위젯 — GPU·네트워크·GitHub 없음)
+# VERSION: v1.2 — 2026-11-11 — kaggle_music_panel.py v1.2: ai_samples()(AI 음색 견본 플레이어) 시험 추가
+# (v1.1) — 2026-10-16 — kaggle_music_panel.py v1.1 시험: ① 분석 → ② Claude 답 읽기 → ③ 곡 만들기 (가짜 위젯 — GPU·네트워크·GitHub 없음)
 #          (v1.0: 업로드·한 번에 만들기)
 r"""
   python3 -m unittest tools.tests.test_kaggle_music_panel -v     (저장소 최상위에서)
@@ -262,6 +263,62 @@ class TestPanel(unittest.TestCase):
     def test_no_widgets(self):
         with mock.patch.dict(sys.modules, {"ipywidgets": None}):
             self.assertEqual(kp.panel(), 1)
+
+
+class TestAISamplesCell(unittest.TestCase):
+    def _ipython(self, displayed):
+        disp = types.ModuleType("IPython.display")
+        disp.display = displayed.append
+        disp.HTML = lambda data=None, **k: ("html", data)  # IPython.display.HTML 은 위치 인자
+        disp.Audio = lambda filename=None, **k: ("audio", filename)
+        ip = types.ModuleType("IPython")
+        ip.display = disp
+        return {"IPython": ip, "IPython.display": disp}
+
+    def test_command(self):
+        cmd = kp.build_ai_samples_command(" strings, piano ", "", 8, 2, Path("/o"), python="py")
+        self.assertEqual(cmd, ["py", str(kp.TOOLS / "kaggle_music_yue2.py"), "samples", "--out", "/o", "--only", "strings,piano",
+                               "--seconds", "8", "--tries", "2"])
+
+    def test_players(self):
+        displayed = []
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+
+            def fake_run(cmd, write=print, log_file=None):
+                out = Path(cmd[cmd.index("--out") + 1])
+                run_dir = out / "ai-1"
+                run_dir.mkdir(parents=True)
+                recs = [dict(key="strings_melody", group="strings", group_ko="스트링", name="스트링 — 단일 멜로디", share=0.91,
+                             verdict_ko="거의 그 악기만", others="피아노 6%", seed=2, file="clips/strings/strings_melody.mp3",
+                             raw_file="clips/strings/strings_melody_ai_raw.mp3"),
+                        dict(key="strings_chords", group="strings", group_ko="스트링", name="스트링 — 코드 진행", file=None)]
+                (run_dir / "index.json").write_text(json.dumps({"samples": recs}, ensure_ascii=False), encoding="utf-8")
+                (out / "latest.txt").write_text(str(run_dir), encoding="utf-8")
+                return 1
+
+            with mock.patch.dict(sys.modules, self._ipython(displayed)), mock.patch.object(kp.km, "OUT", d), \
+                    mock.patch.object(kp, "run_command", side_effect=fake_run):
+                self.assertEqual(kp.ai_samples("strings"), 1)
+            audio = [x[1] for x in displayed if x[0] == "audio"]
+            self.assertEqual(audio, [str(d / "ai_samples" / "ai-1" / "clips/strings/strings_melody.mp3"),
+                                     str(d / "ai_samples" / "ai-1" / "clips/strings/strings_melody_ai_raw.mp3")])
+            text = " ".join(x[1] for x in displayed if x[0] == "html")
+            self.assertIn("목표 트랙 91%", text)
+            self.assertIn("만들지 못함", text)
+
+    def test_stale_latest_is_ignored(self):
+        displayed = []
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "ai_samples").mkdir()
+            (d / "ai_samples" / "latest.txt").write_text(str(d), encoding="utf-8")
+            old = time.time() - 3600
+            os.utime(d / "ai_samples" / "latest.txt", (old, old))
+            with mock.patch.dict(sys.modules, self._ipython(displayed)), mock.patch.object(kp.km, "OUT", d), \
+                    mock.patch.object(kp, "run_command", return_value=1):
+                self.assertEqual(kp.ai_samples(), 1)
+            self.assertEqual(displayed, [])
 
 
 if __name__ == "__main__":

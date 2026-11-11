@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# VERSION: v1.2 — 2026-10-15 — kaggle_music_yue2.py v1.2 시험 추가: 참고 곡 분석(조성·태그·프롬프트), 멜로디 검사(같은 멜로디·조옮김·
+# VERSION: v1.6 — 2026-11-11 — kaggle_music_yue2.py v1.6 시험 추가: AI 음색 견본 (시드마다 다시·한 악기 판정·목표 트랙만·실패/메모리 부족, samples 명령의 GPU 나누기·index.json·입력 오류)
+# (v1.2) — 2026-10-15 — kaggle_music_yue2.py v1.2 시험 추가: 참고 곡 분석(조성·태그·프롬프트), 멜로디 검사(같은 멜로디·조옮김·
 #          박자 표기·구간 복사는 '검토 필요', 무작위 멜로디는 통과), 올리기(원곡·원곡 악보는 절대 안 올림, 로컬 git 원격으로 push 흐름)
 #          (v1.1: music-ytb 로 옮김 · v1.0: 입력·T4 패치·환경 — 가짜 모듈·가짜 nvidia-smi, GPU·네트워크·모델 없음)
 r"""
@@ -23,6 +24,7 @@ from unittest import mock
 TOOLS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(TOOLS))
 import kaggle_music_yue2 as km  # noqa: E402
+import ai_samples as ais  # noqa: E402
 
 
 def fake_modules():
@@ -579,6 +581,134 @@ class TestEnv(unittest.TestCase):
             km.main(["run", "--ref", "auto", "--count", "3", "--style-extra", "J-pop band", "--push", "--name", "x"])
         args = run.call_args[0][0]
         self.assertEqual((args.ref, args.count, args.style_extra, args.push, args.seeds), ("auto", 3, "J-pop band", True, None))
+
+
+class TestAISamples(unittest.TestCase):
+    """v1.6 samples — 가짜 생성·가짜 Demucs·가짜 ffmpeg (GPU·모델 없음)."""
+
+    def _fakes(self, d, shares_by_seed, fail_seeds=(), oom_seed=None):
+        calls = {"gen": [], "ffmpeg": [], "write": []}
+
+        def gen(pipe, ns, seed, meta):
+            calls["gen"].append((ns.name, seed, ns.style[:20], ns.plan_mode, ns.sections, ns.mode))
+            if seed == oom_seed:
+                raise type("OutOfMemoryError", (RuntimeError,), {})("CUDA out of memory")
+            if seed in fail_seeds:
+                raise ValueError("YuE2 악보가 비었거나 잘림")
+            out = Path(ns.out) / ns.name / f"seed-{seed}"
+            out.mkdir(parents=True)
+            (out / "audio.flac").write_bytes(b"f")
+            return out
+
+        def runner(cmd):
+            calls["ffmpeg"].append(cmd)
+            Path(cmd[-1]).write_bytes(b"a")
+            return 0
+
+        def separate(wav):
+            seed = int(Path(wav).parent.name.split("-")[1])
+            return {k: (k, seed) for k in shares_by_seed[seed]}, 44100, {}
+
+        energy = lambda arrays: {k: shares_by_seed[v[1]][k] for k, v in arrays.items()}  # noqa: E731
+
+        def write(path, arr, sr):
+            calls["write"].append((Path(path).name, arr))
+            Path(path).write_bytes(b"w")
+            return Path(path)
+
+        return calls, dict(gen=gen, runner=runner, separate=separate, write=write, energy=energy)
+
+    def _args(self, d):
+        return km.argparse.Namespace(mode="instrumental", style="", name="ai-1", out=str(d), sections="Verse",
+                                     plan_mode="full", cot="full", seeds="1")
+
+    def test_retries_until_one_instrument_and_keeps_only_that_track(self):
+        job = ais.plan_jobs(ais.select("", "strings_melody"), [0], seed=1, tries=3)[0]
+        shares = {1: {"other": 0.4, "drums": 0.6}, 2: {"other": 0.9, "piano": 0.1}, 3: {"other": 1.0}}
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            calls, fakes = self._fakes(d, shares)
+            rc = km.run_sample_jobs(None, self._args(d), {}, job, **fakes)
+            self.assertEqual(rc, 0)
+            self.assertEqual([c[1] for c in calls["gen"]], [1, 2])  # 시드 2 에서 90% → 시드 3 은 안 만듦
+            self.assertEqual(calls["gen"][0][3:], ("melody", "Verse", "instrumental"))
+            self.assertEqual(calls["write"], [("strings_melody.wav", ("other", 2))])  # 목표 트랙('그 밖')만 걸러 냄
+            rec = json.loads((d / "ai-1" / "clips" / "strings" / "strings_melody.json").read_text(encoding="utf-8"))
+            self.assertEqual((rec["seed"], rec["share"], rec["verdict"]), (2, 0.9, "solo"))
+            self.assertEqual(rec["file"], "clips/strings/strings_melody.mp3")
+            self.assertEqual(rec["raw_file"], "clips/strings/strings_melody_ai_raw.mp3")
+            self.assertEqual([a["seed"] for a in rec["attempts"]], [1, 2])
+            self.assertTrue(rec["style"].startswith("Instrumental, solo string section"))
+            clip = calls["ffmpeg"][0]
+            self.assertTrue(clip[clip.index("-i") + 1].endswith("seed-1/audio.flac"))
+
+    def test_best_of_tries_when_never_solo(self):
+        job = ais.plan_jobs(ais.select("", "drums_acoustic"), [0], tries=3)[0]
+        shares = {1: {"drums": 0.55, "guitar": 0.45}, 2: {"drums": 0.7, "bass": 0.3}, 3: {"drums": 0.6, "other": 0.4}}
+        with tempfile.TemporaryDirectory() as d:
+            calls, fakes = self._fakes(Path(d), shares)
+            self.assertEqual(km.run_sample_jobs(None, self._args(d), {}, job, **fakes), 0)
+            rec = json.loads((Path(d) / "ai-1" / "clips" / "drums" / "drums_acoustic.json").read_text(encoding="utf-8"))
+            self.assertEqual((len(calls["gen"]), rec["seed"], rec["verdict"]), (3, 2, "mixed"))  # 가장 높은 시드 2
+            self.assertEqual(rec["others"], "베이스 30%")
+
+    def test_failures_and_oom(self):
+        jobs = ais.plan_jobs(ais.select("", "bass_electric,bass_synth"), [0], tries=2)[0]
+        with tempfile.TemporaryDirectory() as d:
+            calls, fakes = self._fakes(Path(d), {2: {"bass": 1.0}}, fail_seeds=(1, 2))
+            self.assertEqual(km.run_sample_jobs(None, self._args(d), {}, jobs, **fakes), 1)  # 둘 다 실패 → 1, 기록은 남김
+            rec = json.loads((Path(d) / "ai-1" / "clips" / "bass" / "bass_electric.json").read_text(encoding="utf-8"))
+            self.assertEqual((rec["verdict"], rec["file"]), ("failed", None))
+            self.assertEqual(len(calls["gen"]), 4)
+        with tempfile.TemporaryDirectory() as d:
+            calls, fakes = self._fakes(Path(d), {}, oom_seed=1)
+            self.assertEqual(km.run_sample_jobs(None, self._args(d), {}, jobs, **fakes), 1)
+            self.assertEqual(len(calls["gen"]), 1)  # 메모리 부족이면 바로 멈춤
+
+    def test_samples_command_splits_jobs_and_writes_index(self):
+        gpus = [dict(index=0, name="T4", mem_mib=15360, driver="560", cap=(7, 5)),
+                dict(index=1, name="T4", mem_mib=15360, driver="560", cap=(7, 5))]
+        seen = []
+
+        class FakeProc:
+            def __init__(self, cmd, env=None, **kw):
+                jobs = json.loads(Path(cmd[cmd.index("--jobs") + 1]).read_text(encoding="utf-8"))
+                seen.append((env.get("CUDA_VISIBLE_DEVICES"), [j["key"] for j in jobs], cmd))
+                run_dir = Path(cmd[cmd.index("--out") + 1]) / cmd[cmd.index("--name") + 1]
+                for j in jobs:
+                    if j["key"] == "strings_chords":
+                        continue  # 이 견본은 기록 없음 → 빠진 것
+                    cd = run_dir / "clips" / j["group"]
+                    cd.mkdir(parents=True, exist_ok=True)
+                    (cd / f"{j['key']}.json").write_text(json.dumps(dict(
+                        key=j["key"], group=j["group"], group_ko=j["group_ko"], name=j["name"], verdict="solo", share=0.9,
+                        file=f"clips/{j['group']}/{j['key']}.mp3", raw_file="r.mp3", meta={"gpu": "T4"})), encoding="utf-8")
+                self.stdout = iter(["[SAMPLES] ok\n"])
+
+            def wait(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(km, "setup", return_value=gpus), \
+                mock.patch.object(km, "run_streamed", return_value=0) as fetch, mock.patch.object(km.subprocess, "Popen", FakeProc), \
+                mock.patch.object(km, "setup_logging"):
+            rc = km.main(["samples", "--only", "piano,strings", "--out", d, "--name", "ai-x", "--tries", "2", "--seconds", "8"])
+            self.assertEqual(rc, 1)  # strings_chords 가 빠짐
+            self.assertIn("--fetch-only", fetch.call_args.args[0])
+            self.assertEqual(sorted((g, k) for g, k, _ in seen),
+                             [("0", ["piano_melody", "strings_melody"]), ("1", ["piano_chords", "strings_chords"])])
+            jobs = json.loads((Path(d) / "ai-x" / "jobs-gpu0.json").read_text(encoding="utf-8"))
+            self.assertEqual((jobs[0]["seeds"], jobs[0]["seconds"], jobs[0]["sections"]), ([1, 2], 8.0, "Verse"))
+            index = json.loads((Path(d) / "ai-x" / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual([r["key"] for r in index["samples"]], ["piano_melody", "piano_chords", "strings_melody"])
+            self.assertNotIn("meta", index["samples"][0])
+            self.assertEqual((Path(d) / "latest.txt").read_text(encoding="utf-8"), str(Path(d) / "ai-x"))
+
+    def test_samples_input_errors_stop_before_install(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(km, "setup") as setup, mock.patch.object(km, "setup_logging"):
+            for bad in (["--only", "guitar"], ["--seconds", "60"], ["--tries", "9"], ["--sections", "벌스"]):
+                with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                    km.main(["samples", "--out", d, *bad])
+            setup.assert_not_called()
 
 
 if __name__ == "__main__":

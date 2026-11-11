@@ -8,14 +8,15 @@
 
 | 파일 | 하는 일 |
 |---|---|
-| `tools/kaggle_music_panel.py` (v1.1) | 노트북 버튼 세 단계: **① 분석 + Claude 에게 보낼 글** → **② Claude 답 읽기** → **③ 곡 만들기** |
-| `tools/kaggle_music_yue2.py` (v1.5) | 설치(처음 한 번) · `analyze`(트랙 분리·분석 → Claude 에게 보낼 글) · `run`(생성 → 멜로디 검사 → 저장소에) — 버튼이 이것을 부름 |
+| `tools/kaggle_music_panel.py` (v1.2) | 노트북 버튼 세 단계: **① 분석 + Claude 에게 보낼 글** → **② Claude 답 읽기** → **③ 곡 만들기** · `ai_samples()` AI 음색 견본 |
+| `tools/kaggle_music_yue2.py` (v1.6) | 설치(처음 한 번) · `analyze`(트랙 분리·분석 → Claude 에게 보낼 글) · `run`(생성 → 멜로디 검사 → 저장소에) — 버튼이 이것을 부름 |
 | `tools/music_analysis.py` (v1.0) | 트랙별 수치·멜로디 특징·곡 구성·Claude 에게 보낼 글·Claude 답 읽기 (순수 계산) |
+| `tools/ai_samples.py` (v1.0) | AI 음색 견본 표(악기·톤별 혼자 연주 프롬프트)·작업 나누기·잘라 내기·'한 악기' 판정 (순수 계산) |
 | `web/melody_pad.html` (v1.0) | **멜로디 찍기** 웹 페이지 원본 (claude.ai 페이지로 올림) — 한 마디 피아노 롤·건반·허밍 파일 → 멜로디 코드 |
 | `tools/kaggle_accomp_panel.py` (v1.1) | 노트북 버튼: 멜로디 코드 → 악기 고르기 → **[반주 만들기]** → 악기별 플레이어 · `samples()` 음색 견본 플레이어 |
 | `tools/kaggle_accomp.py` (v1.1) | 반주 설치·AI 생성(악기마다 차례로)·악기별 WAV·MIDI·저장소에 · `samples` 음색 견본 — 버튼이 이것을 부름 |
 | `tools/accomp.py` (v1.1) | 멜로디 코드·AMT 토큰·악기 음역 거르기·16분 격자·MIDI 쓰기·사운드폰트 렌더·음색 견본 표 (순수 계산) |
-| `tools/tests/` | GPU·네트워크 없이 도는 시험 102개: `python3 -m unittest tools.tests.test_kaggle_music_yue2 tools.tests.test_kaggle_music_panel tools.tests.test_music_analysis tools.tests.test_accomp tools.tests.test_kaggle_accomp tools.tests.test_kaggle_accomp_panel -v` (numpy·mido·tinysoundfont 가 있으면 소리·MIDI 시험도, 사운드폰트 실제 렌더는 `ACCOMP_TEST_SF2=<sf2>`) |
+| `tools/tests/` | GPU·네트워크 없이 도는 시험 116개: `python3 -m unittest tools.tests.test_kaggle_music_yue2 tools.tests.test_kaggle_music_panel tools.tests.test_music_analysis tools.tests.test_ai_samples tools.tests.test_accomp tools.tests.test_kaggle_accomp tools.tests.test_kaggle_accomp_panel -v` (numpy·mido·tinysoundfont 가 있으면 소리·MIDI 시험도, 사운드폰트 실제 렌더는 `ACCOMP_TEST_SF2=<sf2>`) |
 | `results/<이름>/` | 올라간 곡 — `seed-N/audio.mp3`(320k)·`score.abc`(AI 악보)·`kaggle_run.json`·`similarity.json`, `analysis.json`·`prompt.txt`·`README.md` |
 | `results/accomp/<이름>/` | 올라간 반주 — 악기마다 `<악기>_1bar.wav`·`<악기>.wav`·`<악기>.mid`, `mix.wav`·`all.mid`·`run.json`·`README.md` |
 
@@ -170,6 +171,50 @@ AI 모델과 소리:
 | `[GEN] … error=… out of memory` | AI 크기 small 또는 반복 마디를 줄여 다시 |
 | `[GEN] … 음이 적음` | 시드를 바꾸거나 반복 마디를 늘려 다시 |
 | `[PUSH] … 올리기 실패` | 결과는 `/kaggle/working/accomp/<이름>/` 에 있음 |
+
+## AI 음색 견본 — 소리까지 AI(YuE2)가 만든 악기별 몇 초
+
+위 '음색 견본 듣기'는 사운드폰트 소리다. 이것은 **YuE2 가 소리 자체를 만든다** (녹음 같은 소리). 악기·톤마다 **10초 안팎**, **한 악기 소리만** 남긴다.
+
+```python
+import sys, importlib
+!test -d /kaggle/working/music-ytb || git clone -q --depth 1 https://github.com/yeomin1024/music-ytb.git /kaggle/working/music-ytb
+!cd /kaggle/working/music-ytb && git config core.fileMode false && git fetch -q origin main && git reset -q --hard origin/main
+sys.path.insert(0, "/kaggle/working/music-ytb/tools")
+import kaggle_music_panel; importlib.reload(kaggle_music_panel).ai_samples("strings,piano")   # 묶음 고르기 (비우면 전부)
+# importlib.reload(kaggle_music_panel).ai_samples(keys="electric_clean_melody,electric_dist_chords")   # 견본 고르기
+```
+
+- 준비: GPU T4 x2 · Internet On (위 '처음 한 번 준비' 1번). 저장소에 올리지 않으니 GITHUB_TOKEN 은 필요 없다.
+- 두 GPU 가 동시에 돌면 RAM 이 빠듯할 수 있다 (로그 `RAM 이 적어…` 경고) — 셀이 멈추면 명령에 `--gpus 0`.
+- **오래 걸린다 (추정, 아직 Kaggle 에서 재지 않음)**: 처음 한 번 설치·모델 받기 몇 분 + 견본 하나에 생성 1~3번 × 몇 분. 두 GPU 가 나눠 만든다. 처음에는 묶음 하나·둘로 해 보고, 첫 `[GEN] … status=done minutes=` 줄로 한 번에 걸리는 시간을 본다.
+- 셀 아래에 견본마다 **판정**(목표 트랙 비중)·**한 악기만** 플레이어·**AI 원래 소리** 플레이어. 파일은 `/kaggle/working/music/ai_samples/<이름>/clips/<묶음>/<견본>.mp3`(한 악기만)·`<견본>_ai_raw.mp3`(걸러 내기 전), 기록 `index.json`.
+
+'한 악기만'을 지키는 방법 (YuE2 는 원래 노래 전체를 만드는 모델이라 혼자 연주를 보장하지 않는다):
+1. **프롬프트**로 혼자 연주를 요청 — 예: `solo string section … orchestral strings only, solo performance, dry studio recording, no other instruments, no drums, no bass, no percussion, no vocals, 100 BPM, C major` (견본마다 `tools/ai_samples.py`). 단일 멜로디는 선율만 계획(`melody`), 코드 진행은 화음까지 계획(`full`)
+2. YuE2 연주곡 (계획 섹션 하나 `Verse` — 짧게) → 앞의 조용한 부분을 빼고 10초 (끝 0.6초 줄임)
+3. **Demucs**(htdemucs_6s)로 드럼·베이스·기타·피아노·보컬·그 밖으로 나눠 **목표 트랙 비중**을 잰다 → 로그 `[SAMPLES] sample=… seed=… share=0.91 others=피아노 6%`
+4. 80% 미만이면 **다른 시드로 다시** (최대 3번, `tries`) → 가장 높은 것을 고른다
+5. 마지막 파일은 **목표 트랙만 걸러 낸 소리**. 판정: 80% 이상 '거의 그 악기만' · 50~80% '다른 소리가 조금 섞여 걸러 냄' · 50% 미만 '모델이 혼자 연주를 잘 안 함'
+
+| 묶음 | 견본 | 걸러 낼 트랙 |
+|---|---|---|
+| 어쿠스틱 기타 | 통기타 — 단일 멜로디 `acoustic_melody` · 통기타 — 코드 진행 `acoustic_chords` | 기타 |
+| 일렉트릭 기타 | 일렉 클린톤 — 단일 멜로디 `electric_clean_melody` · 일렉 클린톤 — 코드 진행 `electric_clean_chords` · 일렉 크런치(오버드라이브) — 단일 멜로디 `electric_crunch_melody` · 일렉 크런치(오버드라이브) — 코드 진행 `electric_crunch_chords` · 일렉 디스토션 — 단일 멜로디 `electric_dist_melody` · 일렉 디스토션 — 코드 진행 (파워 코드) `electric_dist_chords` · 재즈 기타 — 코드 진행 `electric_jazz_chords` | 기타 |
+| 그랜드 피아노 | 그랜드 피아노 — 단일 멜로디 `piano_melody` · 그랜드 피아노 — 코드 진행 `piano_chords` | 피아노 |
+| 스트링 | 스트링 — 단일 멜로디 (현악 합주) `strings_melody` · 스트링 — 코드 진행 (현악 합주) `strings_chords` | 그 밖 |
+| 드럼 | 드럼 — 어쿠스틱 드럼 세트 `drums_acoustic` · 드럼 — 전자 드럼 (드럼 머신) `drums_electronic` | 드럼 |
+| 베이스 | 일렉 베이스 — 베이스 라인 `bass_electric` · 신스 베이스 — 베이스 라인 `bass_synth` | 베이스 |
+| 신디사이저 | 신스 리드 — 단일 멜로디 `synth_lead` · 신스 패드 — 코드 진행 `synth_pad` | 그 밖 |
+
+한계:
+- Demucs 트랙이 6개뿐이라 **스트링·신스는 둘 다 '그 밖' 트랙** — 스트링 견본에 신스 패드가 섞여 나오면 나눌 수 없다 (그때 판정 비중은 높게 나온다 → AI 원래 소리와 비교해 듣기). 기타 톤끼리(클린·디스토션)도 같은 '기타' 트랙.
+- 걸러 낸 소리에는 분리 흔적(울림이 줄거나 다른 악기 잔향)이 남을 수 있다. 비중이 높을수록 적다.
+- 80%·50% 기준은 경험칙이다 (Kaggle 에서 실제 값을 보고 조정).
+- 드럼 견본도 YuE2 는 선율 악보를 먼저 쓰므로 멜로디 악기가 섞이기 쉽다 → 드럼 트랙만 남기지만 비중이 낮으면 `tries` 를 늘린다.
+- 라이선스: YuE2 가중치 CC BY-NC 4.0 + 창작자 추가 허가 (위 '라이선스').
+
+명령으로: `!python /kaggle/working/music-ytb/tools/kaggle_music_yue2.py samples --only strings --seconds 10 --tries 3` · 빠진 것만 다시: `--keys <견본>` · 다른 결과: `--seed 10`.
 
 ## Claude 에게 보낼 글 (① 이 만들어 줌)
 

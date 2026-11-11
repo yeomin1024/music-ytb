@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# VERSION: v1.5 — 2026-10-24 — 사용자 지시 "멜로디 한 마디 … 베이스, 드럼, 일렉기타, 피아노 … 각각 한 악기의 음원만 … B 방식(AI)으로 해봐":
+# VERSION: v1.6 — 2026-11-11 — 사용자 지시 "2번으로 소리까지 AI가 만드는 셀" + "스트링 소리도 추가 … 한 악기씩만 나오도록 해야해":
+#          samples 명령 — 악기·톤마다 YuE2 로 몇 초짜리 견본, Demucs 로 목표 트랙 비중을 재 모자라면 다음 시드, 목표 트랙만 걸러 냄
+# (v1.5) — 2026-10-24 — 사용자 지시 "멜로디 한 마디 … 베이스, 드럼, 일렉기타, 피아노 … 각각 한 악기의 음원만 … B 방식(AI)으로 해봐":
 #          새 도구 tools/kaggle_accomp.py 가 저장소 올리기를 같이 쓰도록 commit_push 를 push_results 에서 떼어 냄 (동작 같음),
 #          도구 버전만 바뀌었을 때 설치를 다시 하지 않게 고침
 # (v1.4) — 2026-10-16 — 사용자 지시 "음악 하나랑 … 멘트와 … 사진 … 트랙을 분리한 후 각각 멜로디, 이펙트 등을 분석하고 변형해서
@@ -29,6 +31,14 @@ Kaggle 노트북 — Settings → Accelerator: **GPU T4 x2**, Internet: **On**. 
   # 프롬프트만으로
   !python /kaggle/working/music-ytb/tools/kaggle_music_yue2.py run --mode instrumental \
       --style "calm lo-fi piano, soft drums, warm bass, 80 BPM" --seeds 1,2
+
+  # AI 음색 견본 — 악기·톤마다 몇 초 (버튼 셀: kaggle_music_panel.ai_samples())
+  !python /kaggle/working/music-ytb/tools/kaggle_music_yue2.py samples [--only acoustic,electric,piano,strings,drums,bass,synth] \
+      [--keys strings_melody,...] [--seconds 10] [--tries 3]
+    견본마다: 혼자 연주 프롬프트(tools/ai_samples.py) → YuE2 연주곡(계획 섹션 하나, --sections Verse) → 앞 무음 빼고 --seconds 초
+    → Demucs htdemucs_6s(CPU — YuE2 가 GPU 를 차지)로 나눠 목표 트랙(기타·피아노·드럼·베이스, 스트링·신스는 '그 밖') 비중
+    → 80% 미만이면 다음 시드 (최대 --tries) → 가장 높은 것의 목표 트랙만 걸러 낸 소리 <견본>.mp3 + AI 원래 소리 <견본>_ai_raw.mp3
+    → /kaggle/working/music/ai_samples/<이름>/clips/<묶음>/ · index.json. 로그 [SAMPLES] sample=… seed=… share=… others=…
 
   - 세션마다 처음 한 번: /tmp/yue2/venv 에 파이썬 3.12 + yue2-infer 0.1.6(해시 고정) + torch 2.10 + 분석 패키지 (몇 분),
     GPU 점검(BF16 행렬곱·어텐션), 모델 YuE2-3B·YuE2-Vae 약 7.8GB(리비전 고정) → /tmp/yue2/hf
@@ -105,6 +115,10 @@ T4(Turing, 연산 능력 7.5)에서 공식 코드가 그대로는 멈추거나 �
 #          로 떼어 냄 — tools/kaggle_accomp.py(새, AI 반주)가 같이 씀. push_results 의 동작·로그·커밋 메시지는 그대로
 #          (시험: 로컬 bare 원격으로 올리기 시험이 그대로 통과). setup 의 '이미 설치됨' 비교에서 도구 버전을 뺌 — 설치 내용이
 #          같으면 도구만 바뀌어도 venv 를 다시 만들지 않는다 (기록에는 남김). 영향: push_results, 새 commit_push, setup
+#   v1.6 — 2026-11-11 — AI 음색 견본(사용자 지시): samples 명령(samples_command), _worker --jobs(run_sample_jobs — 시드마다 생성 →
+#          clip → Demucs CPU 비중 → SOLO_MIN 이상이면 멈춤 → 목표 트랙만 write_stem), stem_energies, pick_gpus(run 의 GPU 고르기를
+#          떼어 냄 — 동작 같음), worker_cmd(jobs_file). 견본 표·판정은 새 파일 tools/ai_samples.py v1.0. run·analyze 는 그대로.
+#          영향: worker, worker_cmd, run(GPU 고르기), main, 새 함수들
 import argparse
 import functools
 import hashlib
@@ -125,8 +139,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import music_analysis as ma  # noqa: E402 — 표준 라이브러리만 (numpy 는 함수 안에서)
+import ai_samples as ais  # noqa: E402 — 표준 라이브러리만
 
-TOOL_VERSION = "v1.5"
+TOOL_VERSION = "v1.6"
 ROOT = Path(__file__).resolve().parent.parent
 
 # ------------------------------------------------------------------ 고정값 (바꾸면 VERSION 을 올리고 CHANGELOG 에 적는다)
@@ -1046,6 +1061,8 @@ def worker(args):
         return 0
     rc = 0
     with pipe:
+        if getattr(args, "jobs", None):  # AI 음색 견본 (samples 명령)
+            return run_sample_jobs(pipe, args, meta, json.loads(Path(args.jobs).read_text(encoding="utf-8")))
         for seed in parse_seeds(args.seeds):
             try:
                 generate_one(pipe, args, seed, meta)
@@ -1295,7 +1312,7 @@ def run_streamed(cmd, env, prefix):
     return proc.wait()
 
 
-def worker_cmd(args, gpu_seeds, fetch_only=False):
+def worker_cmd(args, gpu_seeds, fetch_only=False, jobs_file=None):
     cmd = [VENV_PY, Path(__file__).resolve(), "_worker", "--mode", args.mode, "--style", args.style,
            "--name", args.name, "--out", args.out, "--seeds", ",".join(map(str, gpu_seeds)),
            "--sections", args.sections, "--plan-mode", args.plan_mode, "--cot", args.cot,
@@ -1305,6 +1322,8 @@ def worker_cmd(args, gpu_seeds, fetch_only=False):
         cmd += ["--lyrics-file", str(Path(args.lyrics_file).resolve())]
     if fetch_only:
         cmd.append("--fetch-only")
+    if jobs_file:
+        cmd += ["--jobs", Path(jobs_file).resolve()]
     if args.quiet:
         cmd.append("--quiet")
     return [str(c) for c in cmd]
@@ -1362,6 +1381,17 @@ def analyze_command(args):
     return 0
 
 
+def pick_gpus(rows, gpus="all"):
+    """setup 이 찾은 GPU 중 --gpus 로 고른 것 (all = 전부) → [번호]."""
+    usable = [g["index"] for g in rows]
+    if gpus != "all":
+        want = [int(x) for x in gpus.split(",") if x.strip()]
+        usable = [i for i in want if i in usable]
+        if not usable:
+            die("INPUT", error=f"--gpus {gpus} 가 없음", hint=f"있는 GPU: {[g['index'] for g in rows]}")
+    return usable
+
+
 def run(args):
     t0 = time.time()
     if not NAME_RE.fullmatch(args.name):
@@ -1388,12 +1418,7 @@ def run(args):
     rows = setup(force=args.reinstall)
     if args.push:
         push_check()
-    usable = [g["index"] for g in rows]
-    if args.gpus != "all":
-        want = [int(x) for x in args.gpus.split(",") if x.strip()]
-        usable = [i for i in want if i in usable]
-        if not usable:
-            die("INPUT", error=f"--gpus {args.gpus} 가 없음", hint=f"있는 GPU: {[g['index'] for g in rows]}")
+    usable = pick_gpus(rows, args.gpus)
     name_dir = Path(args.out) / args.name
 
     # 참고 곡 → 분석 → 프롬프트
@@ -1440,6 +1465,165 @@ def run(args):
         log("DONE", file=f)
     push_rc = push_results(name_dir, results, push_allow(args), args.push_flac) if args.push else 0
     return 1 if any(codes.values()) or push_rc else 0
+
+
+# ------------------------------------------------------------------ AI 음색 견본 (samples 명령 · _worker --jobs)
+def stem_energies(arrays):
+    """{트랙: (2, N) 배열} → {트랙: 평균 제곱 에너지}."""
+    import numpy as np
+    return {k: float(np.mean(np.square(v, dtype=np.float64))) if v.size else 0.0 for k, v in arrays.items()}
+
+
+def write_stem(path, arr, sr):
+    """(venv) (2, N) 트랙 → 16bit WAV (최고점 -1dBFS)."""
+    import numpy as np
+    import soundfile as sf
+    peak = float(np.abs(arr).max()) if arr.size else 0.0
+    gain = 10 ** (-1 / 20) / peak if peak > 0 else 1.0
+    sf.write(str(path), np.ascontiguousarray((arr * gain).T), sr, subtype="PCM_16")
+    return path
+
+
+def run_sample_jobs(pipe, args, meta, jobs, gen=None, separate=None, runner=None, write=None, energy=None):
+    """(venv) 견본 작업마다: 시드 차례로 생성 → 잘라 내기 → Demucs(CPU) 로 목표 트랙 비중 → SOLO_MIN 이상이면 멈춤
+    → 가장 높은 시드의 목표 트랙만 걸러 낸 소리 + AI 원래 소리 + 기록(<묶음>/<견본>.json) → 종료 코드."""
+    gen = gen or generate_one
+    separate = separate or (lambda wav: separate_stems(wav, "cpu"))  # YuE2 가 GPU 메모리를 차지 — 10초 견본은 CPU 로 충분
+    runner = runner or (lambda cmd: subprocess.run([str(c) for c in cmd]).returncode)
+    write = write or write_stem
+    energy = energy or stem_energies
+    run_dir = Path(args.out) / args.name
+    rc = 0
+    for job in jobs:
+        key, stem = job["key"], job["stem"]
+        ns = argparse.Namespace(**{**vars(args), "mode": "instrumental", "style": job["style"], "sections": job["sections"],
+                                   "plan_mode": job["plan_mode"], "name": key, "out": str(run_dir)})
+        clip_dir = run_dir / "clips" / job["group"]
+        clip_dir.mkdir(parents=True, exist_ok=True)
+        log("SAMPLES", sample=key, name=job["name"], stem=stem, plan_mode=job["plan_mode"], seeds=",".join(map(str, job["seeds"])))
+        best, tried = None, []
+        for seed in job["seeds"]:
+            try:
+                out = gen(pipe, ns, seed, meta)
+            except Exception as e:  # noqa: BLE001
+                if type(e).__name__ == "OutOfMemoryError":
+                    log("SAMPLES", logging.ERROR, sample=key, seed=seed, error=f"GPU 메모리 부족: {str(e).splitlines()[0]}",
+                        hint="--chunk 128 · --gpus 0 · 남은 견본은 --keys 로 다시")
+                    return 1  # 메모리 상태가 불확실하니 멈춤
+                log("SAMPLES", logging.WARNING, sample=key, seed=seed, error=f"{type(e).__name__}: {e}", hint="다음 시드로")
+                tried.append(dict(seed=seed, error=f"{type(e).__name__}: {e}"))
+                continue
+            raw = out / "clip.wav"
+            if runner(ais.clip_cmd(out / "audio.flac", raw, job["seconds"])) != 0 or not raw.is_file():
+                log("SAMPLES", logging.WARNING, sample=key, seed=seed, error="잘라 내기(ffmpeg) 실패", hint="다음 시드로")
+                tried.append(dict(seed=seed, error="clip"))
+                continue
+            try:
+                arrays, sr, _info = separate(raw)
+            except Exception as e:  # noqa: BLE001
+                log("SAMPLES", logging.WARNING, sample=key, seed=seed, error=f"트랙 나누기 실패: {type(e).__name__}: {e}",
+                    hint="다음 시드로")
+                tried.append(dict(seed=seed, error=f"demucs: {type(e).__name__}"))
+                continue
+            shares = ais.stem_shares(energy(arrays))
+            share = shares.get(stem, 0.0)
+            log("SAMPLES", sample=key, seed=seed, stem=stem, share=share, others=ais.others_text(shares, stem),
+                verdict=ais.solo_verdict(share)[0], need=ais.SOLO_MIN)
+            tried.append(dict(seed=seed, share=share, shares=shares))
+            if best is None or share > best["share"]:
+                best = dict(seed=seed, share=share, shares=shares, out=out, raw=raw, stem_audio=arrays[stem], sr=sr)
+            del arrays
+            if share >= ais.SOLO_MIN:
+                break
+        record = dict(tool=TOOL_VERSION, created=datetime.now().isoformat(timespec="seconds"), key=key, group=job["group"],
+                      group_ko=job["group_ko"], name=job["name"], style=instrumental_style(job["style"]), plan_mode=job["plan_mode"],
+                      sections=job["sections"], stem=stem, seconds=job["seconds"], attempts=tried, meta=meta,
+                      note="연구·교육용. YuE2 가중치 CC BY-NC 4.0 + 창작자 추가 허가")
+        if best is None:
+            rc = 1
+            record.update(verdict="failed", verdict_ko="만들지 못함", file=None, raw_file=None)
+            log("SAMPLES", logging.ERROR, sample=key, error=f"시드 {len(tried)}개 모두 실패", hint=f"--keys {key} --seed 10 으로 다시")
+        else:
+            stem_wav = write(clip_dir / f"{key}.wav", best["stem_audio"], best["sr"])
+            mp3, raw_mp3 = clip_dir / f"{key}.mp3", clip_dir / f"{key}_ai_raw.mp3"
+            file = mp3 if runner(ais.mp3_cmd(stem_wav, mp3)) == 0 and mp3.is_file() else stem_wav
+            raw_file = raw_mp3 if runner(ais.mp3_cmd(best["raw"], raw_mp3)) == 0 and raw_mp3.is_file() else best["raw"]
+            code, words = ais.solo_verdict(best["share"])
+            record.update(seed=best["seed"], share=best["share"], shares=best["shares"], verdict=code, verdict_ko=words,
+                          others=ais.others_text(best["shares"], stem), file=str(file.relative_to(run_dir)),
+                          raw_file=str(Path(raw_file).relative_to(run_dir)), source=str(best["out"].relative_to(run_dir)))
+            log("SAMPLES", sample=key, status="done", seed=best["seed"], share=best["share"], verdict=code, file=file)
+            if code != "solo":
+                log("SAMPLES", logging.WARNING, sample=key, warning=f"{len(tried)}번 해도 목표 트랙 {best['share']:.0%}",
+                    hint=f"--keys {key} --tries 5 또는 --seed 10 으로 다시")
+        (clip_dir / f"{key}.json").write_text(json.dumps(record, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    return rc
+
+
+def samples_command(args):
+    """(Kaggle 기본 파이썬) 설치 → 견본을 GPU 마다 나눠 _worker --jobs → 기록 모아 index.json·latest.txt."""
+    t0 = time.time()
+    if not NAME_RE.fullmatch(args.name):
+        die("INPUT", error=f"이름 {args.name!r}", hint="영문·숫자·_.- 만")
+    try:
+        picked = ais.select(args.only, args.keys)
+        if not 4 <= args.seconds <= 30:
+            raise ValueError(f"--seconds 는 4~30: {args.seconds}")
+        section_lyrics(args.sections)
+        ais.plan_jobs(picked, [0], args.seed, args.tries, args.sections, args.seconds)  # tries 범위 확인
+    except ValueError as e:
+        die("INPUT", error=str(e), hint="--only " + ",".join(ais.GROUPS) + " · --seconds 4~30 · --tries 1~5")
+    rows = setup(force=args.reinstall)
+    usable = pick_gpus(rows, args.gpus)
+    plan = ais.plan_jobs(picked, usable, args.seed, args.tries, args.sections, args.seconds)
+    run_dir = Path(args.out) / args.name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log("SAMPLES", samples=len(picked), keys=",".join(s.key for s in picked), tries=args.tries, seconds=args.seconds,
+        sections=args.sections, gpus=";".join(f"{g}:{len(j)}" for g, j in plan.items()), out=run_dir,
+        note="견본 하나 = 생성 1~tries 번 (한 번에 몇 분 — 추정, 첫 [GEN] status=done 줄의 minutes 로 확인)")
+    wargs = argparse.Namespace(mode="instrumental", style="", name=args.name, out=str(Path(args.out)), sections=args.sections,
+                               plan_mode="full", cot="full", backend=args.backend, chunk=args.chunk, offload_ar=args.offload_ar,
+                               model_rev=args.model_rev, vae_rev=args.vae_rev, log_level=args.log_level, lyrics_file=None,
+                               quiet=args.quiet)
+    first = next(iter(plan))
+    if run_streamed(worker_cmd(wargs, [args.seed], fetch_only=True), worker_env(first), "fetch"):
+        die("LOAD", error="모델 받기 실패", hint="위 fetch 줄의 [LOAD] 오류 확인")
+    procs, threads = [], []
+    for gpu, jobs in plan.items():
+        jobs_file = run_dir / f"jobs-gpu{gpu}.json"
+        jobs_file.write_text(json.dumps(jobs, ensure_ascii=False, indent=1), encoding="utf-8")
+        p = subprocess.Popen(worker_cmd(wargs, [args.seed], jobs_file=jobs_file), env=worker_env(gpu),
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        t = threading.Thread(target=stream, args=(p, f"gpu{gpu}", LOG.info), daemon=True)
+        t.start()
+        procs.append((gpu, p))
+        threads.append(t)
+    codes = {gpu: p.wait() for gpu, p in procs}
+    for t in threads:
+        t.join()
+    index, missing = [], []
+    for s in picked:
+        rec_file = run_dir / "clips" / s.group / f"{s.key}.json"
+        if not rec_file.is_file():
+            missing.append(s.key)
+            continue
+        rec = json.loads(rec_file.read_text(encoding="utf-8"))
+        rec.pop("meta", None)
+        index.append(rec)
+        if not rec.get("file"):
+            missing.append(s.key)
+    (run_dir / "index.json").write_text(json.dumps(dict(tool=TOOL_VERSION, created=datetime.now().isoformat(timespec="seconds"),
+                                                         seconds=args.seconds, tries=args.tries, sections=args.sections,
+                                                         solo_min=ais.SOLO_MIN, samples=index), ensure_ascii=False, indent=1),
+                                        encoding="utf-8")
+    Path(args.out).mkdir(parents=True, exist_ok=True)
+    (Path(args.out) / "latest.txt").write_text(str(run_dir), encoding="utf-8")
+    counts = {c: sum(1 for r in index if r.get("verdict") == c) for c in ("solo", "mixed", "poor", "failed")}
+    log("DONE", minutes=round((time.time() - t0) / 60, 1), made=len(index) - counts["failed"],
+        **{f"verdict_{k}": v for k, v in counts.items() if v}, missing=",".join(missing) or "-",
+        exit=",".join(f"gpu{g}={c}" for g, c in codes.items()), index=run_dir / "index.json",
+        hint="-" if not missing else f"빠진 것만 다시: samples --keys {','.join(missing)}")
+    return 1 if any(codes.values()) or missing else 0
 
 
 # ------------------------------------------------------------------ 명령줄
@@ -1513,7 +1697,30 @@ def main(argv=None):
     w = sub.add_parser("_worker", help=argparse.SUPPRESS)
     add_gen_args(w)
     w.add_argument("--fetch-only", action="store_true")
+    w.add_argument("--jobs", help=argparse.SUPPRESS)
+    m = sub.add_parser("samples", help="AI 음색 견본 — 악기·톤마다 몇 초, 목표 악기 트랙만 (tools/ai_samples.py)")
+    m.add_argument("--only", default="", help="묶음 쉼표로: " + ",".join(ais.GROUPS) + " (비우면 전부)")
+    m.add_argument("--keys", default="", help="견본 이름 쉼표로 (예: strings_melody,piano_chords)")
+    m.add_argument("--seconds", type=float, default=ais.DEFAULT_SECONDS, help="견본 길이 초 (4~30)")
+    m.add_argument("--tries", type=int, default=ais.DEFAULT_TRIES, help="한 악기 비중이 모자랄 때 다시 만들 최대 횟수 (1~5)")
+    m.add_argument("--seed", type=int, default=1, help="첫 시드 (다시 할 때마다 +1)")
+    m.add_argument("--sections", default=ais.DEFAULT_SECTIONS, help="계획 섹션 (짧게 — 기본 Verse 하나)")
+    m.add_argument("--name", default=None)
+    m.add_argument("--out", default=str(OUT / "ai_samples"))
+    m.add_argument("--gpus", default="all")
+    m.add_argument("--backend", choices=("torch", "torch-eager"), default="torch")
+    m.add_argument("--chunk", type=int, default=DEFAULT_CHUNK)
+    m.add_argument("--offload-ar", choices=("auto", "on", "off"), default="auto")
+    m.add_argument("--model-rev", default=MODEL_REV)
+    m.add_argument("--vae-rev", default=VAE_REV)
+    m.add_argument("--quiet", action="store_true")
+    m.add_argument("--reinstall", action="store_true")
+    m.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING"), default="INFO")
     args = ap.parse_args(argv)
+    if args.command == "samples":
+        args.name = args.name or f"ai-samples-{datetime.now():%Y%m%d-%H%M%S}"
+        setup_logging(args.log_level, Path(args.out) / "samples.log")
+        return samples_command(args)
     if args.command == "run":
         prefix = "bgm" if args.mode == "instrumental" else "song"
         args.name = args.name or f"{prefix}-{datetime.now():%Y%m%d-%H%M%S}"
