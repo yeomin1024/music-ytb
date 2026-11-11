@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# VERSION: v1.0 — 2026-10-24 — tools/accomp.py v1.0 시험: 멜로디 코드, AMT 토큰 왕복, 악기·음역 거르기, 격자, MIDI, 렌더·섞기·WAV
+# VERSION: v1.1 — 2026-11-11 — accomp.py v1.1: 음색 견본 표(SAMPLES)·악절(sample_notes)·초 단위 렌더(render_notes) 시험 추가
+# (v1.0) — 2026-10-24 — tools/accomp.py v1.0 시험: 멜로디 코드, AMT 토큰 왕복, 악기·음역 거르기, 격자, MIDI, 렌더·섞기·WAV
 #          (GPU·네트워크 없음. 실제 사운드폰트 렌더는 tinysoundfont 와 ACCOMP_TEST_SF2=<sf2 경로> 가 있을 때만)
 r"""
   python3 -m unittest tools.tests.test_accomp -v     (저장소 최상위에서)
@@ -174,6 +175,87 @@ class TestAudio(unittest.TestCase):
             a = ac.render(notes, inst, 120, 8, os.environ["ACCOMP_TEST_SF2"], tail=0.5)
             with self.subTest(key=key):
                 self.assertGreater(float(np.abs(a).max()), 0.01)
+
+
+class TestSamples(unittest.TestCase):
+    """음색 견본 — 사용자가 부탁한 묶음·톤이 다 있고, 악절이 두 마디 안·음역 안·반주 도구 악기와 번호가 맞는지."""
+
+    def test_catalog_covers_request(self):
+        keys = [x.key for x in ac.SAMPLES]
+        self.assertEqual(len(keys), len(set(keys)))
+        self.assertEqual({x.group for x in ac.SAMPLES}, set(ac.SAMPLE_GROUPS))
+        by = {x.key: x for x in ac.SAMPLES}
+        for need in ("acoustic_steel_melody", "acoustic_steel_chords", "electric_clean_melody", "electric_clean_chords",
+                     "electric_overdrive_melody", "electric_overdrive_chords", "electric_distortion_melody",
+                     "electric_distortion_chords", "piano_grand_melody", "piano_grand_chords", "drums_standard", "bass_finger",
+                     "synth_square_lead", "synth_warm_pad"):
+            self.assertIn(need, by)
+        self.assertEqual((by["piano_grand_melody"].bank, by["piano_grand_melody"].preset), (0, 0))  # GM 0 = 그랜드 피아노
+        for x in ac.SAMPLES:
+            with self.subTest(sample=x.key):
+                self.assertIn(x.part, ac.SAMPLE_PARTS)
+                self.assertEqual(x.drums, x.group == "drums")
+                if x.uses:  # 반주 도구 악기와 같은 소리라고 적었으면 번호가 같아야
+                    inst = ac.INSTRUMENTS[x.uses]
+                    if inst.drums:
+                        self.assertEqual((x.drums, x.preset), (True, 0))  # 반주 렌더는 드럼 세트 0 (스탠더드)
+                    else:
+                        self.assertEqual((x.bank, x.preset), (0, inst.program))
+
+    def test_notes_inside_two_bars_and_ranges(self):
+        st = ac.step_seconds(ac.SAMPLE_BPM)
+        end = ac.SAMPLE_STEPS * st
+        for x in ac.SAMPLES:
+            notes = ac.sample_notes(x)
+            with self.subTest(sample=x.key):
+                self.assertTrue(notes)
+                self.assertEqual(notes, sorted(notes))
+                for t, d, p, v in notes:
+                    self.assertGreaterEqual(t, 0)
+                    self.assertLessEqual(t + d, end + 1e-6)
+                    self.assertTrue(0 <= p <= 127 and 1 <= v <= 127 and d > 0)
+                if x.group == "bass":
+                    self.assertTrue(all(28 <= p <= 60 for _, _, p, _ in notes))  # E1~C4
+                if x.drums:
+                    self.assertEqual({p for _, _, p, _ in notes}, {36, 38, 42, 46, 49})
+        mel = ac.sample_notes(ac.Sample("m", "electric", "m", 0, 27, "melody", 100, -12))
+        self.assertEqual([p for _, _, p, _ in mel][:3], [64, 62, 60])  # 기타 멜로디는 한 옥타브 아래 (E4 D4 C4)
+
+    def test_strum_order(self):
+        down = ac.strum(1.0, 0.5, (48, 52, 55, 60, 64), 90)
+        self.assertEqual([p for _, _, p, _ in down], [48, 52, 55, 60, 64])  # 낮은 줄부터
+        self.assertEqual([round(t - 1.0, 3) for t, _, _, _ in down], [0, 0.012, 0.024, 0.036, 0.048])
+        up = ac.strum(1.0, 0.5, (48, 52, 55, 60, 64), 90, up=True)
+        self.assertEqual([p for _, _, p, _ in up], [64, 60, 55, 52])  # 높은 줄부터, 윗줄 4개
+        self.assertEqual({v for _, _, _, v in up}, {75})
+        chords = ac.sample_notes(ac.SAMPLES[[x.key for x in ac.SAMPLES].index("acoustic_steel_chords")])
+        first = [p for t, _, p, _ in chords if t < 0.1]
+        self.assertEqual(first, [48, 52, 55, 60, 64])  # 첫 박 = C 코드 다운 스트럼
+        with self.assertRaises(ValueError):
+            ac.sample_notes(ac.Sample("x", "synth", "x", 0, 0, "nope"))
+
+    @unittest.skipIf(np is None, "numpy 없음")
+    def test_render_notes_bank_preset_velocity(self):
+        class VelSynth(FakeSynth):
+            def noteon(self, ch, key, vel):
+                super().noteon(ch, key, vel)
+                self.calls.append(("on", ch, key, vel))
+
+        made = []
+        factory = lambda **kw: made.append(VelSynth(**kw)) or made[-1]  # noqa: E731
+        a = ac.render_notes([(0.0, 0.5, 60, 77), (0.25, 0.5, 64, 99)], "x.sf2", 8, 27, sr=1000, tail=0.5, synth_factory=factory)
+        self.assertEqual(a.shape, (1250, 2))  # 마지막 음 끝 0.75초 + 꼬리 0.5초
+        self.assertEqual(made[0].calls[0], ("program", 0, 8, 27, False))
+        self.assertEqual([c[3] for c in made[0].calls if c[0] == "on"], [77, 99])
+        ac.render_notes([(0.0, 0.1, 36, 100)], "x.sf2", 0, 25, drums=True, seconds=1.0, sr=1000, tail=0, synth_factory=factory)
+        self.assertEqual(made[1].calls[0], ("program", 9, 128, 25, True))  # 드럼 = 10번 채널·뱅크 128·세트 번호
+
+    @unittest.skipIf(tinysoundfont is None or not os.environ.get("ACCOMP_TEST_SF2"), "tinysoundfont·ACCOMP_TEST_SF2 없음")
+    def test_real_soundfont_every_sample_sounds(self):
+        for x in ac.SAMPLES:
+            a = ac.render_notes(ac.sample_notes(x), os.environ["ACCOMP_TEST_SF2"], x.bank, x.preset, x.drums, 4.8, tail=0.5)
+            with self.subTest(sample=x.key):
+                self.assertGreater(float(np.abs(a).max()), 0.005)
 
 
 if __name__ == "__main__":

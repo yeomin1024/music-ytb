@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# VERSION: v1.0 — 2026-10-24 — tools/kaggle_accomp.py v1.0 시험 (가짜 AMT·가짜 torch·가짜 사운드폰트 — GPU·네트워크·GitHub 없음)
+# VERSION: v1.1 — 2026-11-11 — kaggle_accomp.py v1.1: samples 명령(make_samples·입력 오류·AI 설치 안 함) 시험 추가
+# (v1.0) — 2026-10-24 — tools/kaggle_accomp.py v1.0 시험 (가짜 AMT·가짜 torch·가짜 사운드폰트 — GPU·네트워크·GitHub 없음)
 r"""
   python3 -m unittest tools.tests.test_kaggle_accomp -v     (저장소 최상위에서)
 
@@ -192,6 +193,75 @@ class TestMidiInput(unittest.TestCase):
             ac.write_midi(Path(d) / "m.mid", [(ac.INSTRUMENTS["piano"], [(s, n, p) for p, s, n in m["notes"]])], 120, 16)
             back = ka.melody_from_midi(Path(d) / "m.mid")
         self.assertEqual((back["bpm"], back["notes"]), (120.0, m["notes"]))
+
+
+class LevelSynth:
+    """tinysoundfont.Synth 대신 — 켜진 음 수 × level. 뱅크·프리셋 고르기를 적는다."""
+    made = []
+
+    def __init__(self, samplerate=44100, gain=0, level=0.1):
+        self.on, self.level, self.program = set(), level, None
+        LevelSynth.made.append(self)
+
+    def sfload(self, path):
+        return 1
+
+    def program_select(self, ch, sfid, bank, preset, is_drums=False):
+        self.program = (ch, bank, preset, is_drums)
+
+    def noteon(self, ch, key, vel):
+        self.on.add(key)
+
+    def noteoff(self, ch, key):
+        self.on.discard(key)
+
+    def generate(self, n):
+        return np.full(2 * n, self.level * len(self.on), dtype=np.float32).tobytes()
+
+
+@unittest.skipIf(np is None, "numpy 없음")
+class TestSamples(unittest.TestCase):
+    def test_make_samples_files_index_and_filter(self):
+        LevelSynth.made = []
+        with tempfile.TemporaryDirectory() as d:
+            idx = ka.make_samples(Path(d), ["electric", "drums"], sf2="x.sf2", sr=2000, synth_factory=LevelSynth)
+            want = [x for x in ac.SAMPLES if x.group in ("electric", "drums")]
+            self.assertEqual([r["key"] for r in idx], [x.key for x in want])
+            self.assertEqual([syn.program for syn in LevelSynth.made],  # 견본마다 그 뱅크·프리셋 (드럼 = 10번 채널·뱅크 128)
+                             [(9 if x.drums else 0, 128 if x.drums else x.bank, x.preset, x.drums) for x in want])
+            for r in idx:
+                with wave.open(str(Path(d) / r["file"])) as w:
+                    self.assertEqual((w.getnchannels(), w.getframerate()), (2, 2000))
+                    peak = max(abs(v) for v in struct_unpack(w.readframes(w.getnframes())))
+                self.assertAlmostEqual(peak / 32767, 10 ** (-1 / 20), places=2)  # 견본마다 -1dBFS
+            rec = json.loads((Path(d) / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(rec["bpm"], ac.SAMPLE_BPM)
+            self.assertEqual(rec["samples"][0]["group_ko"], "일렉트릭 기타")
+            self.assertEqual(next(r for r in idx if r["key"] == "electric_clean_chords")["uses"], "guitar_clean")
+
+    def test_silent_preset_is_skipped(self):
+        with tempfile.TemporaryDirectory() as d:
+            idx = ka.make_samples(Path(d), ["bass"], sf2="x.sf2", sr=1000,
+                                  synth_factory=lambda **kw: LevelSynth(level=0.0, **kw))
+            self.assertEqual(idx, [])
+            self.assertEqual(list(Path(d).rglob("*.wav")), [])
+
+    def test_samples_command_does_not_install_ai(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(ka, "ensure_sound") as es, \
+                mock.patch.object(ka, "setup") as setup, mock.patch.object(ka, "make_samples", return_value=[{"key": "x"}]) as ms:
+            self.assertEqual(ka.main(["samples", "--only", "drums, bass", "--out", d, "--bpm", "90"]), 0)
+            es.assert_called_once()
+            setup.assert_not_called()
+            self.assertEqual(ms.call_args.args, (Path(d), ["drums", "bass"], 90.0))
+            for bad in (["samples", "--only", "guitar"], ["samples", "--bpm", "300"]):
+                with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                    ka.main(bad + ["--out", d])
+            self.assertEqual(ms.call_count, 1)
+
+
+def struct_unpack(raw):
+    import struct
+    return struct.unpack(f"<{len(raw) // 2}h", raw)
 
 
 if __name__ == "__main__":

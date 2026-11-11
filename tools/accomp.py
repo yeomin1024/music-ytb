@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# VERSION: v1.0 — 2026-10-24 — 사용자 지시 "내가 멜로디 한 마디를 찍고 악기를 선택하면 그걸 기반으로 베이스, 드럼, 일렉기타, 피아노 등도
+# VERSION: v1.1 — 2026-11-11 — 사용자 지시 "어쿠스틱 기타(단일 멜로디, 코드 진행 각각), 일렉트릭 기타(단일 멜로디, 코드 진행, 클린톤 등
+#          톤별 각각), 그랜드 피아노, 드럼, 베이스, 신디사이저 샘플 좀 몇 초 들려주는 코드": 음색 견본 표 SAMPLES·sample_notes, 초 단위
+#          렌더 render_notes (render 는 이것을 부름 — 결과 같음)
+# (v1.0) — 2026-10-24 — 사용자 지시 "내가 멜로디 한 마디를 찍고 악기를 선택하면 그걸 기반으로 베이스, 드럼, 일렉기타, 피아노 등도
 #          한 마디씩 각각 한 악기의 음원만 나오게 할 수 있어? … B 방식(AI 모델)으로 해봐"
 r"""
 멜로디 한 마디 → AI 반주(Anticipatory Music Transformer, Stanford CRFM) — 순수 계산 부분. kaggle_accomp.py 가 쓴다.
@@ -14,18 +17,23 @@ r"""
   quantize / steps_to_seconds       16분음표 격자에 맞추기 (마디 밖·중복 음 버림)
   write_midi                        표준 MIDI 파일 (표준 라이브러리만 — 템포·박자·악기 번호·드럼 10번 채널)
   render / mix / write_wav          사운드폰트(GeneralUser GS)로 악기별 소리 (tinysoundfont), 16bit WAV
+  SAMPLES / sample_notes            음색 견본 — 같은 짧은 악절(C–G–Am–F, 100 BPM 두 마디)을 악기·톤마다 (render_notes 로 렌더)
 
 불러올 때는 표준 라이브러리만 (numpy·tinysoundfont 는 render·mix·write_wav 안에서). ※ 연구·교육용.
 """
 # CHANGELOG
 #   v1.0 — 2026-10-24 — 새 파일 (위 함수들). AMT 어휘 상수는 anticipation/vocab.py(커밋 af37397)와 같은 값 — kaggle_accomp.py 가
 #          실행 때 실제 패키지 값과 맞는지 확인한다. 영향: tools/kaggle_accomp.py, tools/kaggle_accomp_panel.py
+#   v1.1 — 2026-11-11 — 음색 견본(사용자 지시): Sample·SAMPLE_GROUPS·SAMPLES(38개 — 사운드폰트 뱅크/프리셋 번호는 GeneralUser GS
+#          v2.0.3 의 프리셋 표에서 확인)·sample_notes(멜로디·스트럼·아르페지오·뮤트·펑크 커팅·파워 코드·피아노·패드·스탭·베이스·드럼)·
+#          strum. 렌더를 render_notes(초 단위 음표·음마다 세기·뱅크/프리셋)로 떼어 냄 — render 의 결과·시험은 그대로.
+#          영향: render, 새 render_notes·strum·sample_notes, tools/kaggle_accomp.py samples 명령
 import math
 import re
 import struct
 from dataclasses import dataclass
 
-MODULE_VERSION = "v1.0"
+MODULE_VERSION = "v1.1"
 
 # ---- AMT 어휘 (anticipation/config.py·vocab.py 와 같은 값 — 실행 때 확인)
 TIME_RESOLUTION = 100  # 10ms
@@ -277,33 +285,199 @@ def write_midi(path, parts, bpm, steps_per_bar=16):
 
 
 # ------------------------------------------------------------------ 소리 (numpy·tinysoundfont)
-def render(notes_steps, inst, bpm, total_steps, sf2, sr=44100, tail=1.5, synth_factory=None):
-    """한 악기만 → float32 (N, 2). 길이 = 격자 total_steps + 꼬리 tail 초."""
+def render_notes(notes, sf2, bank=0, preset=0, drums=False, seconds=None, sr=44100, tail=1.5, synth_factory=None):
+    """초 단위 음표 [(시작 초, 길이 초, 음, 세기)] 를 사운드폰트 한 소리(뱅크·프리셋)로 → float32 (N, 2).
+    길이 = seconds(없으면 마지막 음 끝) + 꼬리 tail 초. 드럼은 10번 채널·뱅크 128, preset = 드럼 세트."""
     import numpy as np
     if synth_factory is None:
         import tinysoundfont
         synth_factory = tinysoundfont.Synth
     synth = synth_factory(samplerate=sr, gain=0)
     sfid = synth.sfload(str(sf2))
-    ch = 9 if inst.drums else 0
-    synth.program_select(ch, sfid, 128 if inst.drums else 0, 0 if inst.drums else inst.program, is_drums=inst.drums)
-    st = step_seconds(bpm)
+    ch = 9 if drums else 0
+    synth.program_select(ch, sfid, 128 if drums else bank, preset, is_drums=drums)
     events = []
-    for s, n, p in notes_steps:
-        events.append((s * st, 1, p))
-        events.append(((s + n) * st, 0, p))
-    total = total_steps * st + tail
+    for start, dur, p, vel in notes:
+        events.append((start, 1, p, vel))
+        events.append((start + dur, 0, p, 0))
+    if seconds is None:
+        seconds = max((e[0] for e in events), default=0.0)
     chunks, t = [], 0
-    for when, on, p in sorted(events, key=lambda e: (e[0], e[1])) + [(total, -1, 0)]:
+    for when, on, p, vel in sorted(events, key=lambda e: (e[0], e[1])) + [(seconds + tail, -1, 0, 0)]:
         n = int(round(when * sr)) - t
         if n > 0:
             chunks.append(np.frombuffer(synth.generate(n), dtype=np.float32).reshape(-1, 2).copy())
             t += n
         if on == 1:
-            synth.noteon(ch, p, inst.velocity)
+            synth.noteon(ch, p, vel)
         elif on == 0:
             synth.noteoff(ch, p)
     return np.concatenate(chunks) if chunks else np.zeros((0, 2), dtype=np.float32)
+
+
+def render(notes_steps, inst, bpm, total_steps, sf2, sr=44100, tail=1.5, synth_factory=None):
+    """한 악기만 → float32 (N, 2). 길이 = 격자 total_steps + 꼬리 tail 초."""
+    notes = [(s, n, p, inst.velocity) for s, n, p in steps_to_seconds(notes_steps, bpm)]
+    return render_notes(notes, sf2, 0, 0 if inst.drums else inst.program, inst.drums, total_steps * step_seconds(bpm), sr, tail,
+                        synth_factory)
+
+
+# ------------------------------------------------------------------ 음색 견본 (같은 악절을 악기·톤마다)
+@dataclass(frozen=True)
+class Sample:
+    key: str
+    group: str        # SAMPLE_GROUPS 키
+    name_ko: str
+    bank: int         # 사운드폰트 뱅크 (드럼은 128 — preset 이 드럼 세트)
+    preset: int
+    part: str         # sample_notes 의 악절 종류
+    velocity: int = 95
+    transpose: int = 0
+    uses: str = ""    # 반주 도구(INSTRUMENTS)에서 같은 소리인 악기 키 — 없으면 아직 못 고름
+
+    @property
+    def drums(self):
+        return self.bank == 128
+
+
+SAMPLE_GROUPS = {"acoustic": "어쿠스틱 기타", "electric": "일렉트릭 기타", "piano": "그랜드 피아노", "drums": "드럼",
+                 "bass": "베이스", "synth": "신디사이저"}
+SAMPLE_BPM = 100
+SAMPLE_STEPS = 32  # 두 마디 — 100 BPM 에서 4.8초 (+ 울림)
+SAMPLES = (
+    Sample("acoustic_steel_melody", "acoustic", "스틸 통기타 — 멜로디", 0, 25, "melody", 100, -12, "acoustic_guitar"),
+    Sample("acoustic_steel_chords", "acoustic", "스틸 통기타 — 코드 진행 (스트럼)", 0, 25, "strum", 95, 0, "acoustic_guitar"),
+    Sample("acoustic_nylon_melody", "acoustic", "나일론 기타 — 멜로디", 0, 24, "melody", 100, -12),
+    Sample("acoustic_nylon_chords", "acoustic", "나일론 기타 — 코드 진행 (아르페지오)", 0, 24, "arpeggio", 95),
+    Sample("acoustic_12string_chords", "acoustic", "12현 기타 — 코드 진행 (스트럼)", 8, 25, "strum", 95),
+    Sample("electric_clean_melody", "electric", "일렉 클린 — 멜로디", 0, 27, "melody", 100, -12, "guitar_clean"),
+    Sample("electric_clean_chords", "electric", "일렉 클린 — 코드 진행 (스트럼)", 0, 27, "strum", 95, 0, "guitar_clean"),
+    Sample("electric_chorus_chords", "electric", "일렉 클린 + 코러스 — 코드 진행", 8, 27, "strum", 95),
+    Sample("electric_jazz_melody", "electric", "재즈 기타 — 멜로디", 0, 26, "melody", 100, -12),
+    Sample("electric_jazz_chords", "electric", "재즈 기타 — 코드 진행", 0, 26, "strum", 90),
+    Sample("electric_muted_chords", "electric", "뮤트 — 코드 진행 (8분 뮤트)", 0, 28, "mute", 100),
+    Sample("electric_funk_chords", "electric", "펑크 기타 — 코드 진행 (16분 커팅)", 8, 28, "funk", 100),
+    Sample("electric_overdrive_melody", "electric", "오버드라이브 — 멜로디", 0, 29, "melody", 100, -12, "guitar_drive"),
+    Sample("electric_overdrive_chords", "electric", "오버드라이브 — 코드 진행 (파워 코드)", 0, 29, "power", 100, 0, "guitar_drive"),
+    Sample("electric_distortion_melody", "electric", "디스토션 — 멜로디", 0, 30, "melody", 100, -12, "guitar_dist"),
+    Sample("electric_distortion_chords", "electric", "디스토션 — 코드 진행 (파워 코드)", 0, 30, "power", 100, 0, "guitar_dist"),
+    Sample("piano_grand_melody", "piano", "그랜드 피아노 — 멜로디", 0, 0, "melody", 90, 0, "piano"),
+    Sample("piano_grand_chords", "piano", "그랜드 피아노 — 코드 진행", 0, 0, "piano_chords", 85, 0, "piano"),
+    Sample("piano_grand_both", "piano", "그랜드 피아노 — 멜로디 + 코드 (두 손)", 0, 0, "piano_both", 88, 0, "piano"),
+    Sample("drums_standard", "drums", "드럼 — 스탠더드", 128, 0, "beat", 100, 0, "drums"),
+    Sample("drums_room", "drums", "드럼 — 룸", 128, 8, "beat"),
+    Sample("drums_power", "drums", "드럼 — 파워 (록)", 128, 16, "beat"),
+    Sample("drums_electronic", "drums", "드럼 — 일렉트로닉", 128, 24, "beat"),
+    Sample("drums_808", "drums", "드럼 — 808/909", 128, 25, "beat"),
+    Sample("drums_jazz", "drums", "드럼 — 재즈", 128, 32, "beat"),
+    Sample("drums_brush", "drums", "드럼 — 브러시", 128, 40, "beat"),
+    Sample("bass_finger", "bass", "핑거 베이스", 0, 33, "bass", 100, 0, "bass"),
+    Sample("bass_pick", "bass", "피크 베이스", 0, 34, "bass", 100),
+    Sample("bass_fretless", "bass", "프렛리스 베이스", 0, 35, "bass", 100),
+    Sample("bass_slap", "bass", "슬랩 베이스", 0, 36, "bass", 100),
+    Sample("bass_synth", "bass", "신스 베이스 1", 0, 38, "bass", 100),
+    Sample("bass_synth101", "bass", "신스 베이스 101", 1, 38, "bass", 100),
+    Sample("synth_square_lead", "synth", "스퀘어 리드 — 멜로디", 0, 80, "melody", 95, 0, "synth_lead"),
+    Sample("synth_saw_lead", "synth", "소우 리드 — 멜로디", 0, 81, "melody", 95),
+    Sample("synth_polysynth", "synth", "폴리신스 — 코드 진행 (스탭)", 0, 90, "stabs", 90),
+    Sample("synth_saw_stack", "synth", "브라이트 소우 스택 — 코드 진행 (스탭)", 11, 100, "stabs", 90),
+    Sample("synth_warm_pad", "synth", "웜 패드 — 코드 진행", 0, 89, "pad", 85, 0, "synth_pad"),
+    Sample("synth_halo_pad", "synth", "헤일로 패드 — 코드 진행", 0, 94, "pad", 85),
+)
+
+# C – G – Am – F, 코드 하나에 반 마디(8칸)
+_PROGRESSION = ("C", "G", "Am", "F")
+_GUITAR = {"C": (48, 52, 55, 60, 64), "G": (43, 47, 50, 55, 59, 67), "Am": (45, 52, 57, 60, 64), "F": (41, 48, 53, 57, 60, 65)}  # 개방현 모양
+_POWER = {"C": (48, 55, 60), "G": (43, 50, 55), "Am": (45, 52, 57), "F": (41, 48, 53)}  # 근음 + 5도 + 옥타브
+_PIANO_RH = {"C": (64, 67, 72), "G": (62, 67, 71), "Am": (64, 69, 72), "F": (65, 69, 72)}
+_PAD = {"C": (60, 64, 67), "G": (59, 62, 67), "Am": (57, 60, 64), "F": (57, 60, 65)}
+_ROOT = {"C": 36, "G": 31, "Am": 33, "F": 29}  # 베이스 근음 (C2·G1·A1·F1)
+_MELODY = ((76, 0, 2), (74, 2, 2), (72, 4, 2), (74, 6, 2), (76, 8, 4), (79, 12, 4), (81, 16, 2), (79, 18, 2), (76, 20, 2),
+           (74, 22, 2), (72, 24, 8))  # (음, 시작 칸, 길이 칸) — E5 D5 C5 D5 E5 G5 A5 G5 E5 D5 C5
+_KICK, _SNARE, _HAT_C, _HAT_O, _CRASH = 36, 38, 42, 46, 49
+SAMPLE_PARTS = ("melody", "strum", "arpeggio", "mute", "funk", "power", "piano_chords", "piano_both", "pad", "stabs", "bass", "beat")
+
+
+def strum(start, dur, pitches, velocity, up=False, spread=0.012):
+    """기타 스트럼 — 줄마다 spread 초씩 늦게 (다운 = 낮은 줄부터, 업 = 높은 줄부터·윗줄 4개만·조금 약하게)."""
+    order = list(reversed(pitches))[:4] if up else list(pitches)
+    vel = max(1, velocity - 15) if up else velocity
+    return [(start + i * spread, max(0.02, dur - i * spread), p, vel) for i, p in enumerate(order)]
+
+
+def sample_notes(sample, bpm=SAMPLE_BPM):
+    """견본 하나 → 초 단위 음표 [(시작 초, 길이 초, 음, 세기)] (두 마디, 시작 칸 순)."""
+    st, v, tr = step_seconds(bpm), sample.velocity, sample.transpose
+    out = []
+
+    def add(step, length, pitch, vel=v):
+        out.append((step * st, length * st, pitch, vel))
+
+    chords = [(c, i * 8) for i, c in enumerate(_PROGRESSION)]
+    part = sample.part
+    if part == "melody":
+        for p, s, n in _MELODY:
+            add(s, n * 0.95, p)
+    elif part == "strum":  # 다운(박) · 다운 · 업
+        for c, s in chords:
+            for at, length, up, dv in ((0, 4, False, 0), (4, 2, False, -8), (6, 2, True, 0)):
+                out += strum((s + at) * st, length * st, _GUITAR[c], v + dv, up)
+    elif part == "arpeggio":  # 근음 → 윗줄 차례로 8분음표, 코드 끝까지 울림
+        for c, s in chords:
+            g = _GUITAR[c]
+            for k, p in enumerate((g[0], g[2], g[3], g[-1])):
+                add(s + 2 * k, 8 - 2 * k, p, v if k == 0 else v - 10)
+    elif part == "mute":  # 낮은 세 줄 8분 뮤트 (짧게)
+        for c, s in chords:
+            for k in range(4):
+                out += strum((s + 2 * k) * st, 0.6 * st, _GUITAR[c][:3], v if k == 0 else v - 12, spread=0.006)
+    elif part == "funk":  # 윗줄 세 개 16분 커팅
+        for c, s in chords:
+            for at, dv in ((0, 0), (2, -15), (3, -5), (5, -15), (6, -5)):
+                out += strum((s + at) * st, 0.45 * st, _GUITAR[c][-3:], v + dv, up=at % 2 == 1, spread=0.005)
+    elif part == "power":  # 파워 코드 8분 (첫 박 강하게)
+        for c, s in chords:
+            for k in range(4):
+                out += strum((s + 2 * k) * st, 1.8 * st, _POWER[c], v if k == 0 else v - 10, spread=0.006)
+    elif part in ("piano_chords", "piano_both"):
+        for c, s in chords:
+            add(s, 8, _ROOT[c] + 12, v)       # 왼손 근음 옥타브
+            add(s, 8, _ROOT[c] + 24, v - 10)
+            if part == "piano_chords":
+                for at in (0, 4):              # 오른손 화음 4분음표 두 번
+                    for p in _PIANO_RH[c]:
+                        add(s + at, 3.8, p, v - 5 if at else v)
+            else:
+                add(s + 4, 4, _ROOT[c] + 31, v - 15)  # 왼손 5도
+        if part == "piano_both":
+            for p, s, n in _MELODY:
+                add(s, n * 0.95, p, v)
+    elif part == "pad":
+        for c, s in chords:
+            for p in _PAD[c]:
+                add(s, 8, p)
+    elif part == "stabs":  # 박 · 엇박 · 엇박
+        for c, s in chords:
+            for at in (0, 3, 6):
+                for p in _PAD[c]:
+                    add(s + at, 1.5, p, v if at == 0 else v - 10)
+    elif part == "bass":  # 근음 · 근음 · 5도 · 옥타브 8분
+        for c, s in chords:
+            for k, iv in enumerate((0, 0, 7, 12)):
+                add(s + 2 * k, 1.8, _ROOT[c] + iv, v if k == 0 else v - 10)
+    elif part == "beat":
+        for s in range(0, SAMPLE_STEPS, 2):
+            if s != 30:
+                add(s, 1, _HAT_C, 85 if s % 4 == 0 else 70)
+        for s in (0, 6, 8, 16, 22, 24, 26):
+            add(s, 1, _KICK, 110)
+        for s in (4, 12, 20, 28):
+            add(s, 1, _SNARE, 105)
+        add(30, 2, _HAT_O, 85)
+        add(0, 4, _CRASH, 95)
+    else:
+        raise ValueError(f"모르는 악절: {part}")
+    return sorted((t, d, p + tr, vel) for t, d, p, vel in out)  # transpose 는 멜로디 견본만 (드럼·화음은 0)
 
 
 def bar_slice(audio, bpm, steps_per_bar, bar_index, sr=44100):

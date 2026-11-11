@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# VERSION: v1.0 — 2026-10-24 — 사용자 지시 "내가 멜로디 한 마디를 찍고 악기를 선택하면 … 베이스, 드럼, 일렉기타, 피아노 등도 한 마디씩
+# VERSION: v1.1 — 2026-11-11 — 사용자 지시 "어쿠스틱 기타(단일 멜로디, 코드 진행 각각), 일렉트릭 기타(…톤별 각각), 그랜드 피아노, 드럼,
+#          베이스, 신디사이저 샘플 좀 몇 초 들려주는 코드": samples() — 음색 견본을 만들어 묶음별 플레이어로
+# (v1.0) — 2026-10-24 — 사용자 지시 "내가 멜로디 한 마디를 찍고 악기를 선택하면 … 베이스, 드럼, 일렉기타, 피아노 등도 한 마디씩
 #          각각 한 악기의 음원만 … 멜로디를 쉽게 찍을 수 있을지 모르겠어" + "B 방식(AI)으로 해봐": 노트북 버튼 패널
 r"""
 Kaggle 노트북 셀(README '반주 만들기')에서 버튼으로: 멜로디 코드 붙여 넣기 → 멜로디 악기·반주 악기 고르기 → [반주 만들기].
@@ -14,12 +16,18 @@ Kaggle 노트북 셀(README '반주 만들기')에서 버튼으로: 멜로디 �
 
   올린 MIDI 는 /tmp/accomp/upload/ 에만. 실행 중에는 버튼이 잠긴다. 멈추려면 Kaggle 의 셀 멈춤(■) — 하위 프로세스까지 함께.
   로그는 아래 칸과 /kaggle/working/accomp/panel.log 에 함께.
+
+음색 견본 (AI 없이 사운드폰트 소리 — GPU 필요 없음, 1분 안쪽):
+  import kaggle_accomp_panel; importlib.reload(kaggle_accomp_panel).samples()          # 전부 (38개, 하나에 약 6초)
+  importlib.reload(kaggle_accomp_panel).samples("electric,drums")                       # 묶음만: acoustic·electric·piano·drums·bass·synth
 ※ 연구·교육용 도구.
 """
 # CHANGELOG
 #   v1.0 — 2026-10-24 — 새 파일: melody_summary·check_inputs·build_command·latest_result·result_rows·panel.
 #          실행·업로드 읽기는 kaggle_music_panel 의 run_command·uploaded_files·save_upload 를 같이 쓴다.
 #          영향: 새 파일, tools/tests/test_kaggle_accomp_panel.py
+#   v1.1 — 2026-11-11 — samples()·build_samples_command·sample_groups (사용자 지시 — 음색 견본 듣기). panel() 은 그대로.
+import html
 import json
 import os
 import sys
@@ -33,7 +41,7 @@ import accomp as ac  # noqa: E402 — 표준 라이브러리만 불러오는 모
 import kaggle_accomp as ka  # noqa: E402
 import kaggle_music_panel as kp  # noqa: E402
 
-PANEL_VERSION = "v1.0"
+PANEL_VERSION = "v1.1"
 MELODY_PAGE_URL = "https://claude.ai/artifact/HinPmeUvyqN7KhBgrGYZ6D"  # 원본 web/melody_pad.html
 UPLOAD_DIR = ka.WORK / "upload"  # /tmp — Kaggle 출력으로 저장되지 않는다
 LOG_FILE = ka.OUT / "panel.log"
@@ -124,6 +132,48 @@ def result_rows(out_dir):
         one, full = out_dir / f"{key}_1bar.wav", out_dir / f"{key}.wav"
         rows.append((key, label, notes, one if one.is_file() else None, full if full.is_file() else None))
     return rows
+
+
+def build_samples_command(only="", bpm=None, out_dir=None, python=sys.executable):
+    cmd = [python, str(TOOLS / "kaggle_accomp.py"), "samples", "--out", str(out_dir or ka.OUT / "samples")]
+    if only:
+        cmd += ["--only", ",".join(g.strip() for g in str(only).split(",") if g.strip())]
+    if bpm:
+        cmd += ["--bpm", str(bpm)]
+    return cmd
+
+
+def sample_groups(index_file):
+    """index.json → [(묶음 이름, [견본 dict])] (표 순서 그대로)."""
+    groups = {}
+    for item in json.loads(Path(index_file).read_text(encoding="utf-8"))["samples"]:
+        groups.setdefault(item["group_ko"], []).append(item)
+    return list(groups.items())
+
+
+def samples(only="", bpm=None):
+    """Kaggle·Jupyter: 음색 견본 만들기(kaggle_accomp.py samples) → 묶음별로 이름·사운드폰트 번호·플레이어."""
+    try:
+        from IPython.display import HTML, Audio, display
+    except ImportError:
+        print("[PANEL] IPython 없음 → kaggle_accomp.py samples (그 파일 머리말)")
+        return 1
+    out_dir = ka.OUT / "samples"
+    t0 = time.time()
+    rc = kp.run_command(build_samples_command(only, bpm, out_dir), write=print, log_file=LOG_FILE)
+    index = out_dir / "index.json"
+    if rc != 0 or not index.is_file() or index.stat().st_mtime < t0:
+        print("[PANEL] 견본 없음 — 위 [ERROR]·level=error 줄 확인")
+        return rc or 1
+    display(HTML("<p>모두 같은 짧은 악절 (C–G–Am–F, 100 BPM 두 마디). 견본마다 크기를 맞췄다 — 톤끼리 크기는 비교하지 않기. "
+                       "'반주 도구'라고 적힌 소리는 반주 만들기에서 바로 고를 수 있다.</p>"))
+    for group_ko, items in sample_groups(index):
+        display(HTML(f"<h3>{html.escape(group_ko)}</h3>"))
+        for it in items:
+            where = f"반주 도구 <code>{html.escape(it['uses'])}</code>" if it["uses"] else "반주 도구에는 아직 없음"
+            display(HTML(f"<b>{html.escape(it['name'])}</b> <small>· 사운드폰트 뱅크/프리셋 {it['soundfont']} · {where}</small>"))
+            display(Audio(filename=str(out_dir / it["file"])))
+    return 0
 
 
 def panel():

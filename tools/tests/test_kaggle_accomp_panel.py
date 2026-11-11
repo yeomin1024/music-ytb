@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# VERSION: v1.0 — 2026-10-24 — kaggle_accomp_panel.py v1.0 시험 (가짜 위젯 — GPU·네트워크·GitHub 없음)
+# VERSION: v1.1 — 2026-11-11 — kaggle_accomp_panel.py v1.1: samples()(음색 견본 플레이어) 시험 추가
+# (v1.0) — 2026-10-24 — kaggle_accomp_panel.py v1.0 시험 (가짜 위젯 — GPU·네트워크·GitHub 없음)
 r"""
   python3 -m unittest tools.tests.test_kaggle_accomp_panel -v     (저장소 최상위에서)
 
@@ -177,6 +178,58 @@ class TestPanel(unittest.TestCase):
     def test_no_widgets(self):
         with mock.patch.dict(sys.modules, {"ipywidgets": None}):
             self.assertEqual(kap.panel(), 1)
+
+
+def fake_ipython(displayed):
+    disp = types.ModuleType("IPython.display")
+    disp.display = displayed.append
+    disp.HTML = lambda data=None, **k: ("html", data)  # IPython.display.HTML 처럼 위치 인자
+    disp.Audio = lambda filename=None, **k: ("audio", filename)
+    ip = types.ModuleType("IPython")
+    ip.display = disp
+    return {"IPython": ip, "IPython.display": disp}
+
+
+class TestSamples(unittest.TestCase):
+    def test_build_samples_command(self):
+        cmd = kap.build_samples_command(" electric, drums ", 90, Path("/o"), python="py")
+        self.assertEqual(cmd, ["py", str(kap.TOOLS / "kaggle_accomp.py"), "samples", "--out", "/o", "--only", "electric,drums",
+                               "--bpm", "90"])
+        self.assertNotIn("--only", kap.build_samples_command("", None, Path("/o")))
+
+    def test_players_grouped_in_order(self):
+        displayed, calls = [], []
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+
+            def fake_run(cmd, write=print, log_file=None):
+                calls.append(cmd)
+                out = Path(cmd[cmd.index("--out") + 1])
+                items = [dict(key=x.key, group=x.group, group_ko=kap.ac.SAMPLE_GROUPS[x.group], name=x.name_ko,
+                              soundfont=f"{x.bank}/{x.preset}", uses=x.uses, file=f"{x.group}/{x.key}.wav")
+                         for x in kap.ac.SAMPLES if x.group in ("electric", "drums")]
+                out.mkdir(parents=True)
+                (out / "index.json").write_text(json.dumps({"samples": items}, ensure_ascii=False), encoding="utf-8")
+                return 0
+
+            with mock.patch.dict(sys.modules, fake_ipython(displayed)), mock.patch.object(kap.ka, "OUT", d), \
+                    mock.patch.object(kap.kp, "run_command", side_effect=fake_run):
+                self.assertEqual(kap.samples("electric,drums"), 0)
+            self.assertEqual(calls[0][calls[0].index("--only") + 1], "electric,drums")
+            heads = [x[1] for x in displayed if x[0] == "html" and x[1].startswith("<h3>")]
+            self.assertEqual(heads, ["<h3>일렉트릭 기타</h3>", "<h3>드럼</h3>"])
+            audio = [x[1] for x in displayed if x[0] == "audio"]
+            self.assertEqual(audio[0], str(d / "samples" / "electric" / "electric_clean_melody.wav"))
+            self.assertEqual(len(audio), len([x for x in kap.ac.SAMPLES if x.group in ("electric", "drums")]))
+            self.assertTrue(any("guitar_clean" in x[1] for x in displayed if x[0] == "html"))
+            self.assertTrue(any("아직 없음" in x[1] for x in displayed if x[0] == "html"))
+
+    def test_failure_shows_nothing(self):
+        displayed = []
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(sys.modules, fake_ipython(displayed)), \
+                mock.patch.object(kap.ka, "OUT", Path(d)), mock.patch.object(kap.kp, "run_command", return_value=1):
+            self.assertEqual(kap.samples(), 1)
+        self.assertEqual(displayed, [])
 
 
 if __name__ == "__main__":

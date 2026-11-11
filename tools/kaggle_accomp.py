@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# VERSION: v1.0 — 2026-10-24 — 사용자 지시 "내가 멜로디 한 마디를 찍고 악기를 선택하면 그걸 기반으로 베이스, 드럼, 일렉기타, 피아노 등도
+# VERSION: v1.1 — 2026-11-11 — 사용자 지시 "어쿠스틱 기타(단일 멜로디, 코드 진행 각각), 일렉트릭 기타(단일 멜로디, 코드 진행, 클린톤 등
+#          톤별 각각), 그랜드 피아노, 드럼, 베이스, 신디사이저 샘플 좀 몇 초 들려주는 코드": samples 명령 (음색 견본 WAV)
+# (v1.0) — 2026-10-24 — 사용자 지시 "내가 멜로디 한 마디를 찍고 악기를 선택하면 그걸 기반으로 베이스, 드럼, 일렉기타, 피아노 등도
 #          한 마디씩 각각 한 악기의 음원만 나오게 할 수 있어? … B 방식(AI 모델)으로 해봐"
 r"""
 멜로디 한 마디 → AI 반주 → 악기마다 따로 된 소리(WAV)·MIDI.  ※ 연구·교육용. Kaggle 실제 실행은 아직 검증 전.
@@ -24,15 +26,24 @@ Kaggle 노트북 셀 (버튼 패널은 tools/kaggle_accomp_panel.py — README '
            all.mid·mix.wav·mix_1bar.wav·run.json. 트랙 사이 크기 균형은 그대로 두고 가장 큰 트랙 최고점을 -1dBFS 로
   [PUSH]   --push: results/accomp/<이름>/ 에 (내 멜로디로 만든 것이라 원곡 문제 없음)
 
+음색 견본 (AI 없이 사운드폰트 소리만 — 반주 결과도 이 소리로 난다. 버튼 셀은 kaggle_accomp_panel.samples()):
+  !python /kaggle/working/music-ytb/tools/kaggle_accomp.py samples [--only acoustic,electric,piano,drums,bass,synth] [--bpm 100]
+  [SAMPLES] 같은 짧은 악절(C–G–Am–F 두 마디)을 악기·톤마다 → /kaggle/working/accomp/samples/<묶음>/<견본>.wav + index.json
+           (견본마다 최고점 -1dBFS 로 맞춤 — 톤끼리 크기 차이는 비교하지 않는다)
+
 한계: 소리는 사운드폰트(실제 연주보다 단순 — 특히 일렉기타) → MIDI 를 작곡 프로그램에 불러와 음색을 바꾸면 좋아진다.
 AMT 는 셈여림(세기)을 만들지 않는다 → 악기마다 같은 세기. 한 마디만으로는 화음이 여럿 가능 → 시드를 바꿔 여러 번 들어 보기.
 """
 # CHANGELOG
 #   v1.0 — 2026-10-24 — 새 도구: setup·check_env·read_melody(코드·글 파일·MIDI)·load_model·generate_parts(악기별 차례, 마스크,
 #          재시도)·export·run(+ --push, kaggle_music_yue2.commit_push)·instruments 명령. 영향: 새 파일, tools/tests/test_kaggle_accomp.py
+#   v1.1 — 2026-11-11 — samples 명령(사용자 지시): ensure_sound(tinysoundfont·numpy·사운드폰트만 — AI 설치 없이)·make_samples
+#          (accomp.SAMPLES → 묶음별 WAV·index.json). load_model·generate_parts 오류를 [LOAD]·[GEN] 줄로 (v1.0 커밋 직전에 넣은 것).
+#          run 은 그대로. 영향: 새 ensure_sound·make_samples·samples 명령, main
 import argparse
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -45,7 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import accomp as ac  # noqa: E402
 import kaggle_music_yue2 as km  # noqa: E402 — 로그·내려받기·저장소 올리기를 같이 쓴다
 
-TOOL_VERSION = "v1.0"
+TOOL_VERSION = "v1.1"
 ROOT = km.ROOT
 ANTICIPATION_COMMIT = "af37397922665a0fb8d474d7988b0f3755a38d45"  # jthickstun/anticipation main 2024-03-18
 PIP_NO_DEPS = (f"anticipation @ git+https://github.com/jthickstun/anticipation@{ANTICIPATION_COMMIT}",
@@ -117,6 +128,20 @@ def setup(force=False):
                      encoding="utf-8")
     log("SETUP", status="done", seconds=round(time.time() - t0, 1))
     return info
+
+
+def ensure_sound():
+    """견본용 — tinysoundfont·numpy·사운드폰트만 (AI·torch 없이). 이미 있으면 건너뜀."""
+    import importlib
+    hint = "Kaggle Settings → Internet: On 확인 뒤 다시"
+    for module, spec, no_deps in (("numpy", "numpy", False), ("tinysoundfont", "tinysoundfont==0.3.7", True)):
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            km.run_cmd([sys.executable, "-m", "pip", "install", "-q", *(["--no-deps"] if no_deps else []), spec], "SETUP", hint)
+            importlib.invalidate_caches()
+    km.download(SOUNDFONT_URL, SOUNDFONT, SOUNDFONT_SHA256, "SETUP")
+    return SOUNDFONT
 
 
 # ------------------------------------------------------------------ 입력
@@ -288,6 +313,36 @@ def push(out_dir, record):
                           retry_hint=f"결과는 {out_dir} 에 있음", parts=len(record["parts"]))
 
 
+def make_samples(out_dir, groups=None, bpm=ac.SAMPLE_BPM, sf2=None, sr=SR, synth_factory=None):
+    """accomp.SAMPLES → out_dir/<묶음>/<견본>.wav (견본마다 최고점 -1dBFS) + index.json → index (list of dict)."""
+    t0 = time.time()
+    picked = [x for x in ac.SAMPLES if not groups or x.group in groups]
+    out_dir = Path(out_dir)
+    index = []
+    for x in picked:
+        notes = ac.sample_notes(x, bpm)
+        audio = ac.render_notes(notes, sf2 or SOUNDFONT, x.bank, x.preset, x.drums, ac.SAMPLE_STEPS * ac.step_seconds(bpm),
+                                sr=sr, tail=1.2, synth_factory=synth_factory)
+        peak = float(abs(audio).max()) if len(audio) else 0.0
+        if peak <= 1e-4:
+            log("SAMPLES", logging.WARNING, sample=x.key, warning="소리 없음", hint="사운드폰트에 이 뱅크·프리셋이 없음 — 표 확인")
+            continue
+        path = out_dir / x.group / f"{x.key}.wav"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ac.write_wav(path, audio * ac.common_gain([audio]), sr)
+        rec = dict(key=x.key, group=x.group, group_ko=ac.SAMPLE_GROUPS[x.group], name=x.name_ko, part=x.part,
+                   soundfont=f"{x.bank}/{x.preset}", uses=x.uses, notes=len(notes), seconds=round(len(audio) / sr, 2),
+                   peak_db=round(20 * math.log10(peak), 1), file=str(path.relative_to(out_dir)))
+        index.append(rec)
+        log("SAMPLES", sample=x.key, name=x.name_ko, sf=rec["soundfont"], notes=rec["notes"], seconds=rec["seconds"],
+            peak_db=rec["peak_db"], accomp=x.uses or "-")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "index.json").write_text(json.dumps(dict(tool=TOOL_VERSION, bpm=bpm, created=datetime.now().isoformat(timespec="seconds"),
+                                                         samples=index), ensure_ascii=False, indent=1), encoding="utf-8")
+    log("SAMPLES", out=out_dir, count=len(index), skipped=len(picked) - len(index), seconds=round(time.time() - t0, 1))
+    return index
+
+
 # ------------------------------------------------------------------ 실행
 def run(args):
     t0 = time.time()
@@ -368,7 +423,22 @@ def main(argv=None):
     s.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING"), default="INFO")
     i = sub.add_parser("instruments", help="악기 목록")
     i.add_argument("--log-level", default="INFO")
+    sm = sub.add_parser("samples", help="음색 견본 — 악기·톤마다 같은 짧은 악절 WAV (AI 없이 사운드폰트 소리)")
+    sm.add_argument("--only", default="", help="묶음 쉼표로: " + ",".join(ac.SAMPLE_GROUPS) + " (비우면 전부)")
+    sm.add_argument("--bpm", type=float, default=ac.SAMPLE_BPM)
+    sm.add_argument("--out", default=str(OUT / "samples"))
+    sm.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING"), default="INFO")
     args = ap.parse_args(argv)
+    if args.command == "samples":
+        km.setup_logging(args.log_level)
+        groups = [g.strip() for g in args.only.split(",") if g.strip()]
+        bad = [g for g in groups if g not in ac.SAMPLE_GROUPS]
+        if bad or not 40 <= args.bpm <= 240:
+            die("INPUT", error=f"--only {','.join(bad)}" if bad else f"--bpm {args.bpm}",
+                hint="묶음: " + ",".join(ac.SAMPLE_GROUPS) + " · bpm 40~240")
+        ensure_sound()
+        index = make_samples(Path(args.out), groups, args.bpm)  # 같은 이름은 덮어씀 (견본은 매번 같은 소리)
+        return 0 if index else 1
     if args.command == "instruments":
         for k, inst in ac.INSTRUMENTS.items():
             print(f"{k:16s} {inst.name_ko:14s} GM {inst.program:3d}  음역 {ac.note_label(inst.low)}~{ac.note_label(inst.high)}  "

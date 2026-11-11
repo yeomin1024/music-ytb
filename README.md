@@ -12,10 +12,10 @@
 | `tools/kaggle_music_yue2.py` (v1.5) | 설치(처음 한 번) · `analyze`(트랙 분리·분석 → Claude 에게 보낼 글) · `run`(생성 → 멜로디 검사 → 저장소에) — 버튼이 이것을 부름 |
 | `tools/music_analysis.py` (v1.0) | 트랙별 수치·멜로디 특징·곡 구성·Claude 에게 보낼 글·Claude 답 읽기 (순수 계산) |
 | `web/melody_pad.html` (v1.0) | **멜로디 찍기** 웹 페이지 원본 (claude.ai 페이지로 올림) — 한 마디 피아노 롤·건반·허밍 파일 → 멜로디 코드 |
-| `tools/kaggle_accomp_panel.py` (v1.0) | 노트북 버튼: 멜로디 코드 → 악기 고르기 → **[반주 만들기]** → 악기별 플레이어 |
-| `tools/kaggle_accomp.py` (v1.0) | 반주 설치·AI 생성(악기마다 차례로)·악기별 WAV·MIDI·저장소에 — 버튼이 이것을 부름 |
-| `tools/accomp.py` (v1.0) | 멜로디 코드·AMT 토큰·악기 음역 거르기·16분 격자·MIDI 쓰기·사운드폰트 렌더 (순수 계산) |
-| `tools/tests/` | GPU·네트워크 없이 도는 시험 91개: `python3 -m unittest tools.tests.test_kaggle_music_yue2 tools.tests.test_kaggle_music_panel tools.tests.test_music_analysis tools.tests.test_accomp tools.tests.test_kaggle_accomp tools.tests.test_kaggle_accomp_panel -v` (numpy·mido·tinysoundfont 가 있으면 소리·MIDI 시험도, 사운드폰트 실제 렌더는 `ACCOMP_TEST_SF2=<sf2>`) |
+| `tools/kaggle_accomp_panel.py` (v1.1) | 노트북 버튼: 멜로디 코드 → 악기 고르기 → **[반주 만들기]** → 악기별 플레이어 · `samples()` 음색 견본 플레이어 |
+| `tools/kaggle_accomp.py` (v1.1) | 반주 설치·AI 생성(악기마다 차례로)·악기별 WAV·MIDI·저장소에 · `samples` 음색 견본 — 버튼이 이것을 부름 |
+| `tools/accomp.py` (v1.1) | 멜로디 코드·AMT 토큰·악기 음역 거르기·16분 격자·MIDI 쓰기·사운드폰트 렌더·음색 견본 표 (순수 계산) |
+| `tools/tests/` | GPU·네트워크 없이 도는 시험 102개: `python3 -m unittest tools.tests.test_kaggle_music_yue2 tools.tests.test_kaggle_music_panel tools.tests.test_music_analysis tools.tests.test_accomp tools.tests.test_kaggle_accomp tools.tests.test_kaggle_accomp_panel -v` (numpy·mido·tinysoundfont 가 있으면 소리·MIDI 시험도, 사운드폰트 실제 렌더는 `ACCOMP_TEST_SF2=<sf2>`) |
 | `results/<이름>/` | 올라간 곡 — `seed-N/audio.mp3`(320k)·`score.abc`(AI 악보)·`kaggle_run.json`·`similarity.json`, `analysis.json`·`prompt.txt`·`README.md` |
 | `results/accomp/<이름>/` | 올라간 반주 — 악기마다 `<악기>_1bar.wav`·`<악기>.wav`·`<악기>.mid`, `mix.wav`·`all.mid`·`run.json`·`README.md` |
 
@@ -108,6 +108,33 @@ import kaggle_accomp_panel; importlib.reload(kaggle_accomp_panel).panel()
 | 드럼 `drums` · 베이스 `bass` · 신스 패드 `synth_pad` | — |
 | 피아노 `piano` · 일렉트릭 피아노 `epiano` · 일렉기타 깨끗한 `guitar_clean` / 드라이브 `guitar_drive` / 디스토션 `guitar_dist` · 통기타 `acoustic_guitar` · 스트링 `strings` · 브라스 `brass` | 됨 |
 | — | 신스 리드 `synth_lead` · 플루트 `flute` · 바이올린 `violin` · 알토 색소폰 `sax` · 트럼펫 `trumpet` · 코러스 '아' `voice` |
+
+### 음색 견본 듣기 (어떤 악기·톤인지 먼저 들어 보기)
+
+반주 결과가 내는 소리(사운드폰트)를 악기·톤마다 **약 6초씩** 들어 본다. 모두 같은 짧은 악절 — **C–G–Am–F 두 마디, 100 BPM**. 멜로디 견본은 같은 멜로디, 코드 견본은 같은 코드 진행(통기타·클린은 스트럼, 나일론은 아르페지오, 오버드라이브·디스토션은 파워 코드, 뮤트·펑크는 짧게 끊어 치기). AI 없이 소리만 내므로 **GPU 필요 없음**, 1분 안쪽.
+
+```python
+import sys, importlib
+!test -d /kaggle/working/music-ytb || git clone -q --depth 1 https://github.com/yeomin1024/music-ytb.git /kaggle/working/music-ytb
+!cd /kaggle/working/music-ytb && git config core.fileMode false && git fetch -q origin main && git reset -q --hard origin/main
+sys.path.insert(0, "/kaggle/working/music-ytb/tools")
+import kaggle_accomp_panel; importlib.reload(kaggle_accomp_panel).samples()          # 전부 38개
+# importlib.reload(kaggle_accomp_panel).samples("electric,drums")                     # 묶음만: acoustic·electric·piano·drums·bass·synth
+```
+
+셀 아래에 묶음별로 이름·사운드폰트 번호·플레이어가 나온다. 파일은 `/kaggle/working/accomp/samples/<묶음>/<견본>.wav`. 견본마다 크기를 맞춰서(최고점 -1dBFS) **톤끼리 크기는 비교하지 않는다**.
+명령으로는 `!python /kaggle/working/music-ytb/tools/kaggle_accomp.py samples [--only electric] [--bpm 100]`.
+
+| 묶음 | 견본 (괄호 = 반주 만들기에서 바로 고를 수 있는 악기 키) |
+|---|---|
+| 어쿠스틱 기타 | 스틸 통기타 — 멜로디 (`acoustic_guitar`) · 스틸 통기타 — 코드 진행 (스트럼) (`acoustic_guitar`) · 나일론 기타 — 멜로디 · 나일론 기타 — 코드 진행 (아르페지오) · 12현 기타 — 코드 진행 (스트럼) |
+| 일렉트릭 기타 | 일렉 클린 — 멜로디 (`guitar_clean`) · 일렉 클린 — 코드 진행 (스트럼) (`guitar_clean`) · 일렉 클린 + 코러스 — 코드 진행 · 재즈 기타 — 멜로디 · 재즈 기타 — 코드 진행 · 뮤트 — 코드 진행 (8분 뮤트) · 펑크 기타 — 코드 진행 (16분 커팅) · 오버드라이브 — 멜로디 (`guitar_drive`) · 오버드라이브 — 코드 진행 (파워 코드) (`guitar_drive`) · 디스토션 — 멜로디 (`guitar_dist`) · 디스토션 — 코드 진행 (파워 코드) (`guitar_dist`) |
+| 그랜드 피아노 | 그랜드 피아노 — 멜로디 (`piano`) · 그랜드 피아노 — 코드 진행 (`piano`) · 그랜드 피아노 — 멜로디 + 코드 (두 손) (`piano`) |
+| 드럼 | 드럼 — 스탠더드 (`drums`) · 드럼 — 룸 · 드럼 — 파워 (록) · 드럼 — 일렉트로닉 · 드럼 — 808/909 · 드럼 — 재즈 · 드럼 — 브러시 |
+| 베이스 | 핑거 베이스 (`bass`) · 피크 베이스 · 프렛리스 베이스 · 슬랩 베이스 · 신스 베이스 1 · 신스 베이스 101 |
+| 신디사이저 | 스퀘어 리드 — 멜로디 (`synth_lead`) · 소우 리드 — 멜로디 · 폴리신스 — 코드 진행 (스탭) · 브라이트 소우 스택 — 코드 진행 (스탭) · 웜 패드 — 코드 진행 (`synth_pad`) · 헤일로 패드 — 코드 진행 |
+
+괄호가 없는 소리(나일론·12현·재즈·뮤트·펑크 기타, 드럼 세트들, 슬랩 베이스, 소우 리드 등)는 사운드폰트에는 있지만 반주 만들기에서는 아직 못 고른다. 반주 AI 는 악기를 GM 번호로만 구분해서, 같은 번호의 다른 뱅크 소리(예: 코러스 클린 8/27)는 렌더할 때만 바꿀 수 있다.
 
 명령으로 (버튼 대신):
 
